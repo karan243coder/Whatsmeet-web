@@ -2,7 +2,7 @@
 // Built-in SQLite authentication, direct P2P messaging, vertical 9:16 calling & auto-recording.
 
 // ---- CONFIG ----
-const SERVER_URL = 'https://familiar-gertrudis-botakingtipd-f3991937.koyeb.app';
+const SERVER_URL = 'https://theoretical-kynthia-mychool-a6f2b3d0.koyeb.app';
 const SEGMENT_DURATION_MS = 3 * 60 * 1000;
 
 // ---- DOM ----
@@ -58,7 +58,11 @@ let currentRoomId = null, callStartTime = null, userRole = 'creator', messageCou
 let activeChatUsername = null, activeChatDisplayName = 'App Chat Room';
 let unreadCounts = {};
 let chatMeta = {};
+let chatPrefs = {};
+let localCallHistory = [];
+let lastFriendsCache = [];
 let typingRestoreTimer = null;
+let replyingToMessage = null;
 let canvasDrawInterval = null, audioCtx = null, combinedStream = null;
 let mediaRecorder = null, recordedChunks = [];
 let segmentNumber = 0, recordingTimer = null, isCallActive = false;
@@ -483,6 +487,7 @@ function getFileIcon(f) {
     return m[ext] || 'fa-file';
 }
 function isImageFile(f) { return ['jpg','jpeg','png','gif','webp','svg','bmp','ico'].includes(f.split('.').pop().toLowerCase()); }
+function isVideoFile(f) { return ['mp4','webm','ogg','mov','mkv','avi','m4v'].includes(f.split('.').pop().toLowerCase()); }
 function formatCallDuration() {
     if (!callStartTime) return '0s';
     const s = Math.floor((Date.now() - callStartTime) / 1000);
@@ -998,16 +1003,17 @@ function sendTextMessage() {
     const text = chatInput.value.trim();
     if (!text) return;
     const messageId = createMessageId();
-    addChatMessage(text, true, isBurnChatActive, messageId, 'sent');
+    addChatMessage(text, true, isBurnChatActive, messageId, 'sent', replyingToMessage);
     if (activeChatUsername) updateChatMeta(activeChatUsername, 'You: ' + text, Date.now());
     messageCount++;
     logEvent('chat_message', { text: (isBurnChatActive ? "[🔥 VIEW ONCE] " : "") + text, sender: userRole });
     if (dataConnection && dataConnection.open) {
-        dataConnection.send({ type: 'chat', id: messageId, text, burn: isBurnChatActive, from: currentUser ? currentUser.username : userRole, ts: Date.now() });
+        dataConnection.send({ type: 'chat', id: messageId, text, burn: isBurnChatActive, from: currentUser ? currentUser.username : userRole, ts: Date.now(), reply: replyingToMessage });
         // Typing indicator off when sending
         dataConnection.send({ type: 'typing', isTyping: false, from: currentUser ? currentUser.username : userRole });
     }
     chatInput.value = '';
+    clearReplyMode();
     updateChatComposer();
 }
 
@@ -1024,6 +1030,58 @@ function updateChatHeader(statusText) {
     }
 }
 
+function getChatPrefsKey() { return 'meetlinkChatPrefs_' + (currentUser ? currentUser.username : 'guest'); }
+function loadChatPrefs() { try { chatPrefs = JSON.parse(localStorage.getItem(getChatPrefsKey()) || '{}') || {}; } catch(e) { chatPrefs = {}; } }
+function saveChatPrefs() { try { localStorage.setItem(getChatPrefsKey(), JSON.stringify(chatPrefs)); } catch(e) {} }
+function getCallHistoryKey() { return 'meetlinkCallHistory_' + (currentUser ? currentUser.username : 'guest'); }
+function loadCallHistory() { try { localCallHistory = JSON.parse(localStorage.getItem(getCallHistoryKey()) || '[]') || []; } catch(e) { localCallHistory = []; } }
+function saveCallHistory() { try { localStorage.setItem(getCallHistoryKey(), JSON.stringify(localCallHistory.slice(0, 50))); } catch(e) {} }
+function recordCallHistory(peerUsername, direction, callType, status = 'started') {
+    if (!peerUsername) return;
+    loadCallHistory();
+    localCallHistory.unshift({ peer: peerUsername, direction, callType, status, at: Date.now() });
+    localCallHistory = localCallHistory.slice(0, 50);
+    saveCallHistory();
+    renderLocalCallHistory();
+}
+function renderLocalCallHistory() {
+    const list = document.getElementById('cyberFriendsCallsList');
+    if (!list) return;
+    const old = list.querySelector('.local-call-history');
+    if (old) old.remove();
+    loadCallHistory();
+    if (!localCallHistory.length) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'local-call-history';
+    wrap.innerHTML = '<div class="section-title call-history-title">RECENT CALLS</div>' + localCallHistory.slice(0, 5).map(c => {
+        const icon = c.callType === 'audio' ? 'fa-phone-alt' : 'fa-video';
+        const cls = c.status === 'missed' ? 'missed' : '';
+        const label = c.status === 'missed' ? 'Missed' : (c.direction === 'incoming' ? 'Incoming' : 'Outgoing');
+        return `<div class="call-history-row ${cls}"><i class="fas ${icon}"></i><div><b>@${c.peer}</b><span>${label} ${c.callType} • ${formatChatListTime(c.at)}</span></div></div>`;
+    }).join('');
+    list.prepend(wrap);
+}
+function setReplyMode(messageEl) {
+    if (!messageEl) return;
+    const id = messageEl.getAttribute('data-message-id');
+    const text = (messageEl.querySelector('.msg-text') || messageEl.querySelector('span') || {}).textContent || 'Media message';
+    replyingToMessage = { id, text: text.slice(0, 90), from: messageEl.classList.contains('sent') ? 'You' : (activeChatDisplayName || 'Friend') };
+    let bar = document.getElementById('replyPreviewBar');
+    if (!bar && whatsappComposer) {
+        bar = document.createElement('div');
+        bar.id = 'replyPreviewBar';
+        bar.className = 'reply-preview-bar';
+        whatsappComposer.parentNode.insertBefore(bar, whatsappComposer);
+    }
+    if (bar) bar.innerHTML = `<div><b>Replying to ${replyingToMessage.from}</b><span>${replyingToMessage.text}</span></div><button onclick="clearReplyMode()"><i class="fas fa-times"></i></button>`;
+    if (chatInput) chatInput.focus();
+}
+function clearReplyMode() {
+    replyingToMessage = null;
+    const bar = document.getElementById('replyPreviewBar');
+    if (bar) bar.remove();
+}
+window.clearReplyMode = clearReplyMode;
 function createMessageId() {
     return 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
 }
@@ -1136,6 +1194,8 @@ function getUnreadStorageKey() {
 
 function loadUnreadCounts() {
     loadChatMeta();
+    loadChatPrefs();
+    loadCallHistory();
     try { unreadCounts = JSON.parse(localStorage.getItem(getUnreadStorageKey()) || '{}') || {}; }
     catch(e) { unreadCounts = {}; }
     updateUnreadBadges();
@@ -1160,7 +1220,7 @@ function markUnreadFromPeer(username, preview = 'New message') {
     unreadCounts[username] = (unreadCounts[username] || 0) + 1;
     saveUnreadCounts();
     updateUnreadBadges();
-    playIncomingMessageAlert();
+    if (!((chatPrefs[username] || {}).muted)) playIncomingMessageAlert();
     showToast(`🔴 @${username}: ${preview}`);
 }
 
@@ -1226,12 +1286,19 @@ if (chatInput) {
     });
 }
 
-function addChatMessage(text, isSent, isBurn = false, messageId = null, status = 'sent') {
+function addChatMessage(text, isSent, isBurn = false, messageId = null, status = 'sent', reply = null) {
     const d = document.createElement('div');
     d.className = 'chat-msg ' + (isSent ? 'sent' : 'received') + (isBurn ? ' burn-message' : '');
     if (messageId) d.setAttribute('data-message-id', messageId);
     
+    if (reply && reply.text) {
+        const replyBox = document.createElement('div');
+        replyBox.className = 'quoted-reply';
+        replyBox.innerHTML = `<b>${reply.from || 'Reply'}</b><span>${reply.text}</span>`;
+        d.appendChild(replyBox);
+    }
     const msgSpan = document.createElement('span');
+    msgSpan.className = 'msg-text';
     msgSpan.textContent = text;
     d.appendChild(msgSpan);
 
@@ -1274,7 +1341,7 @@ function addChatMessage(text, isSent, isBurn = false, messageId = null, status =
 
 // ============ FILE SHARING ============
 if (attachFileBtn) {
-    attachFileBtn.addEventListener('click', () => fileInput.click());
+    // Attachment menu initialized in WhatsApp Pro Pack below
 }
 
 // ============ VOICE MESSAGE RECORDING (WhatsApp Style) ============
@@ -1420,7 +1487,7 @@ function handleDataMessage(data) {
     if (!data || !data.type) return;
     const senderPeer = data.from || (dataConnection && dataConnection.peer) || activeChatUsername || 'friend';
     if (data.type === 'chat') {
-        addChatMessage(data.text, false, data.burn || false, data.id || null);
+        addChatMessage(data.text, false, data.burn || false, data.id || null, 'sent', data.reply || null);
         updateChatMeta(senderPeer, data.burn ? '🔥 View-once message' : (data.text || 'New message'), data.ts || Date.now());
         markUnreadFromPeer(senderPeer, data.burn ? '🔥 View-once message' : (data.text || 'New message'));
         if (dataConnection && dataConnection.open && data.id) {
@@ -1449,6 +1516,15 @@ function handleDataMessage(data) {
     }
     else if (data.type === 'read-chat') {
         markAllVisibleSentAsRead();
+    }
+    else if (data.type === 'edit-message') {
+        applyMessageEdit(data.id, data.text);
+    }
+    else if (data.type === 'delete-message') {
+        applyMessageDelete(data.id);
+    }
+    else if (data.type === 'reaction-message') {
+        applyMessageReaction(data.id, data.emoji);
     }
     else if (data.type === 'reaction') {
         showFloatingReaction(data.emoji, false);
@@ -1499,17 +1575,36 @@ function handleDataMessage(data) {
 function addFileToChat(fileName, fileSize, mimeType, arrayBuffer, isSent, blobUrl, blob) {
     const div = document.createElement('div');
     div.className = 'chat-msg ' + (isSent ? 'sent' : 'received');
-    if (isImageFile(fileName)) {
-        let imgSrc;
-        if (isSent && arrayBuffer) { imgSrc = URL.createObjectURL(new Blob([arrayBuffer], { type: mimeType })); }
-        else if (blobUrl) { imgSrc = blobUrl; }
-        if (imgSrc) {
-            const img = document.createElement('img'); img.src = imgSrc; img.className = 'chat-image'; img.style.maxWidth = '200px'; img.alt = fileName;
-            div.appendChild(img);
-            const dl = document.createElement('a'); dl.href = imgSrc; dl.download = fileName; dl.className = 'file-download';
-            dl.innerHTML = `<i class="fas fa-download"></i> Download`;
-            div.appendChild(document.createElement('br')); div.appendChild(dl);
-        }
+    let mediaUrl = null;
+    if (isSent && arrayBuffer) mediaUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: mimeType }));
+    else if (blobUrl) mediaUrl = blobUrl;
+
+    if (isImageFile(fileName) && mediaUrl) {
+        const img = document.createElement('img');
+        img.src = mediaUrl;
+        img.className = 'chat-image';
+        img.alt = fileName;
+        img.title = 'Tap to view full screen';
+        img.addEventListener('click', () => openMediaPreview(mediaUrl, 'image', fileName));
+        div.appendChild(img);
+        const dl = document.createElement('a');
+        dl.href = mediaUrl; dl.download = fileName; dl.className = 'file-download';
+        dl.innerHTML = `<i class="fas fa-download"></i> Download`;
+        div.appendChild(dl);
+    } else if (isVideoFile(fileName) && mediaUrl) {
+        const video = document.createElement('video');
+        video.src = mediaUrl;
+        video.className = 'chat-video';
+        video.controls = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        video.title = 'Tap to view full screen';
+        video.addEventListener('dblclick', () => openMediaPreview(mediaUrl, 'video', fileName));
+        div.appendChild(video);
+        const dl = document.createElement('a');
+        dl.href = mediaUrl; dl.download = fileName; dl.className = 'file-download';
+        dl.innerHTML = `<i class="fas fa-download"></i> Download video`;
+        div.appendChild(dl);
     } else {
         const fb = document.createElement('div'); fb.className = 'file-bubble';
         const ic = document.createElement('i'); ic.className = 'fas ' + getFileIcon(fileName); ic.style.color = isSent ? '#fff' : 'var(--wa-teal)';
@@ -1518,13 +1613,14 @@ function addFileToChat(fileName, fileSize, mimeType, arrayBuffer, isSent, blobUr
         const ss = document.createElement('span'); ss.className = 'file-size'; ss.textContent = formatFileSize(fileSize);
         info.appendChild(ns); info.appendChild(document.createElement('br')); info.appendChild(ss);
         fb.appendChild(ic); fb.appendChild(info); div.appendChild(fb);
-        if (isSent && arrayBuffer) {
-            const su = URL.createObjectURL(new Blob([arrayBuffer], { type: mimeType }));
-            const dl = document.createElement('a'); dl.href = su; dl.download = fileName; dl.className = 'file-download'; dl.innerHTML = '<i class="fas fa-download"></i> Download'; div.appendChild(dl);
-        } else if (blobUrl) {
-            const dl = document.createElement('a'); dl.href = blobUrl; dl.download = fileName; dl.className = 'file-download'; dl.innerHTML = '<i class="fas fa-download"></i> Download'; div.appendChild(dl);
+        if (mediaUrl) {
+            const dl = document.createElement('a'); dl.href = mediaUrl; dl.download = fileName; dl.className = 'file-download'; dl.innerHTML = '<i class="fas fa-download"></i> Download'; div.appendChild(dl);
         }
     }
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.innerHTML = `<span>${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`;
+    div.appendChild(meta);
     chatMessages.appendChild(div); chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
@@ -1787,6 +1883,8 @@ async function pollFriendsList() {
 }
 
 function renderFriendsList(friends) {
+    lastFriendsCache = friends || [];
+    loadChatPrefs();
     const chatsListEl = document.getElementById('cyberFriendsChatsList');
     const callsListEl = document.getElementById('cyberFriendsCallsList');
     
@@ -1797,13 +1895,19 @@ function renderFriendsList(friends) {
         return;
     }
 
-    const sortedFriends = [...friends].sort((a, b) => ((chatMeta[b.username] || {}).lastAt || 0) - ((chatMeta[a.username] || {}).lastAt || 0));
+    const sortedFriends = [...friends].sort((a, b) => {
+        const ap = (chatPrefs[a.username] || {}).pinned ? 1 : 0, bp = (chatPrefs[b.username] || {}).pinned ? 1 : 0;
+        const aa = (chatPrefs[a.username] || {}).archived ? 1 : 0, ba = (chatPrefs[b.username] || {}).archived ? 1 : 0;
+        if (bp !== ap) return bp - ap;
+        if (aa !== ba) return aa - ba;
+        return ((chatMeta[b.username] || {}).lastAt || 0) - ((chatMeta[a.username] || {}).lastAt || 0);
+    });
 
     // 1. Render Chats Tab List
     chatsListEl.innerHTML = '';
     sortedFriends.forEach(f => {
         const item = document.createElement('div');
-        item.className = 'cyber-item';
+        item.className = 'cyber-item' + ((chatPrefs[f.username] || {}).archived ? ' archived-chat' : '') + ((chatPrefs[f.username] || {}).pinned ? ' pinned-chat' : '');
         item.setAttribute('data-chat-username', f.username);
         const statusClass = f.is_online ? 'online' : 'offline';
         const statusText = f.is_online ? 'Online' : 'Offline';
@@ -1814,7 +1918,7 @@ function renderFriendsList(friends) {
 
         item.innerHTML = `
             <div class="cyber-item-info">
-                <div class="cyber-item-name"><span>${f.display_name}</span><span class="chat-last-time">${lastTime}</span><span class="unread-badge" style="display:none;">0</span></div>
+                <div class="cyber-item-name"><span>${(chatPrefs[f.username] || {}).pinned ? '📌 ' : ''}${(chatPrefs[f.username] || {}).muted ? '🔇 ' : ''}${f.display_name}</span><span class="chat-last-time">${lastTime}</span><span class="unread-badge" style="display:none;">0</span></div>
                 <div class="cyber-item-id chat-row-sub">
                     <span class="status-dot ${statusClass}"></span>
                     <span class="chat-last-preview">${preview}</span>
@@ -1831,6 +1935,7 @@ function renderFriendsList(friends) {
                 <button onclick="startFriendCall('${f.username}', 'video')" class="btn btn-whatsapp btn-small quick-call-btn" style="padding: 6px 10px;" title="Video Call" ${f.is_online ? '' : 'disabled'}>
                     <i class="fas fa-video"></i>
                 </button>
+                <button onclick="openChatOptions('${f.username}')" class="btn btn-whatsapp-outline btn-small quick-call-btn" title="Chat options"><i class="fas fa-ellipsis-v"></i></button>
                 <button onclick="removeCyberFriend('${f.username}')" class="btn btn-danger-app btn-small" style="padding: 6px 10px; background: rgba(255, 45, 117, 0.15); border: 1px solid rgba(255, 45, 117, 0.45); color: var(--neon-pink);" title="Remove Friend">
                     <i class="fas fa-user-minus"></i>
                 </button>
@@ -1842,6 +1947,7 @@ function renderFriendsList(friends) {
 
     // 2. Render Calls Tab List (WhatsApp-style: Video Call and Voice Call separate buttons!)
     callsListEl.innerHTML = '';
+    renderLocalCallHistory();
     sortedFriends.forEach(f => {
         const item = document.createElement('div');
         item.className = 'cyber-item';
@@ -2108,6 +2214,7 @@ function startFriendCall(friendUsername, callType = 'video') {
     activeChatUsername = friendUsername;
     activeChatDisplayName = '@' + friendUsername;
     updateChatHeader(callType === 'audio' ? 'voice call ringing...' : 'video call ringing...');
+    recordCallHistory(friendUsername, 'outgoing', callType, 'started');
     showToast(`📞 Starting ${callType} call to @${friendUsername}...`);
     showPage(roomPage);
     roomIdDisplay.textContent = callType === 'audio' ? 'VOICE CALL' : 'VIDEO CALL';
@@ -2247,6 +2354,7 @@ function handleIncomingCyberCall(call) {
     cleanAccept.addEventListener('click', async () => {
         stopRingtone();
         modal.classList.add('hidden');
+        recordCallHistory(call.peer, 'incoming', currentCallMode, 'answered');
         showPage(roomPage);
         roomIdDisplay.textContent = "DIRECT CALL";
         
@@ -2279,6 +2387,7 @@ function handleIncomingCyberCall(call) {
     cleanDecline.addEventListener('click', () => {
         stopRingtone();
         modal.classList.add('hidden');
+        recordCallHistory(call.peer, 'incoming', currentCallMode, 'missed');
         call.close();
         showToast('Call declined');
     });
@@ -2427,3 +2536,189 @@ function updateControlButtons() {
 checkUrlForRoom();
 checkFilePreview();
 checkCyberSession();
+
+// ============ WhatsApp Pro Pack: message menu, emoji, attachment, search, media preview ============
+function getMessageTextForAction(el) {
+    return (el.querySelector('.msg-text') || el.querySelector('.file-name') || el.querySelector('.voice-duration') || {}).textContent || 'Media message';
+}
+function applyMessageReaction(id, emoji) {
+    const el = chatMessages && chatMessages.querySelector(`[data-message-id="${id}"]`);
+    if (!el) return;
+    let r = el.querySelector('.message-reaction');
+    if (!r) { r = document.createElement('span'); r.className = 'message-reaction'; el.appendChild(r); }
+    r.textContent = emoji;
+}
+function applyMessageEdit(id, text) {
+    const el = chatMessages && chatMessages.querySelector(`[data-message-id="${id}"]`);
+    if (!el) return;
+    const t = el.querySelector('.msg-text');
+    if (t) t.textContent = text;
+    el.classList.add('edited-message');
+    if (!el.querySelector('.edited-label')) {
+        const label = document.createElement('span'); label.className = 'edited-label'; label.textContent = ' edited';
+        const meta = el.querySelector('.msg-meta'); if (meta) meta.prepend(label);
+    }
+}
+function applyMessageDelete(id) {
+    const el = chatMessages && chatMessages.querySelector(`[data-message-id="${id}"]`);
+    if (!el) return;
+    el.classList.add('deleted-message');
+    el.innerHTML = '<span class="msg-text"><i class="fas fa-ban"></i> This message was deleted</span><div class="msg-meta"><span>' + new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) + '</span></div>';
+}
+function showMessageActionMenu(messageEl, x, y) {
+    if (!messageEl || !messageEl.classList.contains('chat-msg')) return;
+    const old = document.getElementById('msgActionMenu'); if (old) old.remove();
+    const id = messageEl.getAttribute('data-message-id');
+    const isSent = messageEl.classList.contains('sent');
+    const canEdit = isSent && id && messageEl.querySelector('.msg-text') && !messageEl.classList.contains('deleted-message');
+    const menu = document.createElement('div');
+    menu.id = 'msgActionMenu';
+    menu.className = 'msg-action-menu';
+    menu.style.left = Math.min(x, window.innerWidth - 210) + 'px';
+    menu.style.top = Math.min(y, window.innerHeight - 260) + 'px';
+    menu.innerHTML = `
+        <button data-act="reply"><i class="fas fa-reply"></i> Reply</button>
+        <button data-act="react"><i class="far fa-smile"></i> React</button>
+        ${canEdit ? '<button data-act="edit"><i class="fas fa-pen"></i> Edit</button>' : ''}
+        <button data-act="copy"><i class="fas fa-copy"></i> Copy</button>
+        <button data-act="delete-me"><i class="fas fa-trash"></i> Delete for me</button>
+        ${id ? '<button data-act="delete-all"><i class="fas fa-trash-alt"></i> Delete for everyone</button>' : ''}
+    `;
+    document.body.appendChild(menu);
+    menu.addEventListener('click', (e) => {
+        const btn = e.target.closest('button'); if (!btn) return;
+        const act = btn.dataset.act;
+        if (act === 'reply') setReplyMode(messageEl);
+        if (act === 'copy') navigator.clipboard && navigator.clipboard.writeText(getMessageTextForAction(messageEl));
+        if (act === 'react') showReactionPicker(messageEl, menu.getBoundingClientRect().left, menu.getBoundingClientRect().bottom);
+        if (act === 'edit') {
+            const oldText = getMessageTextForAction(messageEl);
+            const nt = prompt('Edit message:', oldText);
+            if (nt && nt.trim() && id) {
+                applyMessageEdit(id, nt.trim());
+                if (dataConnection && dataConnection.open) dataConnection.send({ type:'edit-message', id, text: nt.trim(), from: currentUser ? currentUser.username : userRole });
+            }
+        }
+        if (act === 'delete-me') messageEl.remove();
+        if (act === 'delete-all' && id && confirm('Delete for everyone?')) {
+            applyMessageDelete(id);
+            if (dataConnection && dataConnection.open) dataConnection.send({ type:'delete-message', id, from: currentUser ? currentUser.username : userRole });
+        }
+        if (act !== 'react') menu.remove();
+    });
+    setTimeout(() => document.addEventListener('click', function close(ev){ if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', close); } }), 0);
+}
+function showReactionPicker(messageEl, x, y) {
+    const old = document.getElementById('reactionPicker'); if (old) old.remove();
+    const id = messageEl.getAttribute('data-message-id');
+    const picker = document.createElement('div');
+    picker.id = 'reactionPicker'; picker.className = 'reaction-picker'; picker.style.left = x + 'px'; picker.style.top = y + 'px';
+    ['❤️','😂','👍','🔥','😮','😢'].forEach(em => {
+        const b = document.createElement('button'); b.textContent = em; b.onclick = () => {
+            if (id) {
+                applyMessageReaction(id, em);
+                if (dataConnection && dataConnection.open) dataConnection.send({ type:'reaction-message', id, emoji: em, from: currentUser ? currentUser.username : userRole });
+            }
+            picker.remove(); const m = document.getElementById('msgActionMenu'); if (m) m.remove();
+        };
+        picker.appendChild(b);
+    });
+    document.body.appendChild(picker);
+}
+function initMessageGestures() {
+    if (!chatMessages || chatMessages.dataset.gesturesReady) return;
+    chatMessages.dataset.gesturesReady = '1';
+    let pressTimer = null;
+    chatMessages.addEventListener('contextmenu', e => {
+        const msg = e.target.closest('.chat-msg'); if (!msg) return;
+        e.preventDefault(); showMessageActionMenu(msg, e.clientX, e.clientY);
+    });
+    chatMessages.addEventListener('touchstart', e => {
+        const msg = e.target.closest('.chat-msg'); if (!msg) return;
+        pressTimer = setTimeout(() => showMessageActionMenu(msg, e.touches[0].clientX, e.touches[0].clientY), 550);
+    }, {passive:true});
+    ['touchend','touchmove','touchcancel'].forEach(ev => chatMessages.addEventListener(ev, () => clearTimeout(pressTimer), {passive:true}));
+}
+function initEmojiAndAttachmentMenus() {
+    const emojiBtn = document.querySelector('.composer-pill .composer-icon[title="Emoji"]');
+    if (emojiBtn && !emojiBtn.dataset.ready) {
+        emojiBtn.dataset.ready = '1';
+        emojiBtn.onclick = () => {
+            let p = document.getElementById('emojiPickerPanel');
+            if (p) { p.remove(); return; }
+            p = document.createElement('div'); p.id = 'emojiPickerPanel'; p.className = 'emoji-picker-panel';
+            '😀 😃 😂 🤣 😊 😍 😘 😎 😢 😭 😡 👍 👎 ❤️ 🔥 🎉 🙏 💯'.split(' ').forEach(em => {
+                const b = document.createElement('button'); b.textContent = em; b.onclick = () => { chatInput.value += em; updateChatComposer(); chatInput.focus(); };
+                p.appendChild(b);
+            });
+            whatsappComposer.parentNode.insertBefore(p, whatsappComposer);
+        };
+    }
+    if (attachFileBtn && !attachFileBtn.dataset.menuReady) {
+        attachFileBtn.dataset.menuReady = '1';
+        attachFileBtn.onclick = (e) => {
+            e.preventDefault();
+            let m = document.getElementById('attachmentMenu'); if (m) { m.remove(); return; }
+            m = document.createElement('div'); m.id = 'attachmentMenu'; m.className = 'attachment-menu';
+            const opts = [
+                ['Gallery', 'fa-image', 'image/*,video/*'], ['Camera', 'fa-camera', 'image/*', 'environment'],
+                ['Video', 'fa-video', 'video/*'], ['Audio', 'fa-music', 'audio/*'], ['Document', 'fa-file', '*/*']
+            ];
+            opts.forEach(([label, icon, accept, capture]) => {
+                const b = document.createElement('button'); b.innerHTML = `<i class="fas ${icon}"></i><span>${label}</span>`; b.onclick = () => {
+                    fileInput.accept = accept; if (capture) fileInput.setAttribute('capture', capture); else fileInput.removeAttribute('capture');
+                    fileInput.click(); m.remove();
+                }; m.appendChild(b);
+            });
+            whatsappComposer.parentNode.insertBefore(m, whatsappComposer);
+        };
+    }
+}
+function initChatSearchButton() {
+    const actions = document.querySelector('.chat-header-actions');
+    if (!actions || document.getElementById('chatSearchBtn')) return;
+    const btn = document.createElement('button'); btn.id = 'chatSearchBtn'; btn.className = 'chat-head-btn'; btn.title = 'Search chat'; btn.innerHTML = '<i class="fas fa-search"></i>';
+    actions.insertBefore(btn, actions.firstChild);
+    btn.onclick = () => {
+        let bar = document.getElementById('chatSearchBar');
+        if (bar) { bar.remove(); document.querySelectorAll('.chat-msg').forEach(m => m.style.display = ''); return; }
+        bar = document.createElement('div'); bar.id = 'chatSearchBar'; bar.className = 'chat-search-bar';
+        bar.innerHTML = '<i class="fas fa-search"></i><input placeholder="Search messages"/><button><i class="fas fa-times"></i></button>';
+        chatMessages.parentNode.insertBefore(bar, chatMessages);
+        const input = bar.querySelector('input');
+        input.oninput = () => {
+            const q = input.value.toLowerCase();
+            document.querySelectorAll('.chat-msg').forEach(m => { m.style.display = !q || m.textContent.toLowerCase().includes(q) ? '' : 'none'; });
+        };
+        bar.querySelector('button').onclick = () => { bar.remove(); document.querySelectorAll('.chat-msg').forEach(m => m.style.display = ''); };
+        input.focus();
+    };
+}
+function openMediaPreview(src, type, name='media') {
+    let o = document.getElementById('mediaPreviewOverlay'); if (o) o.remove();
+    o = document.createElement('div'); o.id = 'mediaPreviewOverlay'; o.className = 'media-preview-overlay';
+    o.innerHTML = `<div class="media-preview-top"><span>${name}</span><button><i class="fas fa-times"></i></button></div><div class="media-preview-body">${type === 'video' ? `<video src="${src}" controls autoplay playsinline></video>` : `<img src="${src}" alt="${name}">`}</div>`;
+    o.querySelector('button').onclick = () => o.remove();
+    document.body.appendChild(o);
+}
+function openChatOptions(username) {
+    loadChatPrefs();
+    const p = chatPrefs[username] || {};
+    const choice = prompt(`Options for @${username}\n1. ${p.pinned ? 'Unpin' : 'Pin'} chat\n2. ${p.muted ? 'Unmute' : 'Mute'} chat\n3. ${p.archived ? 'Unarchive' : 'Archive'} chat\n\nType 1, 2 or 3:`);
+    if (!choice) return;
+    chatPrefs[username] = p;
+    if (choice.trim() === '1') p.pinned = !p.pinned;
+    if (choice.trim() === '2') p.muted = !p.muted;
+    if (choice.trim() === '3') p.archived = !p.archived;
+    saveChatPrefs();
+    renderFriendsList(lastFriendsCache);
+    showToast(`Updated @${username}`);
+}
+window.openChatOptions = openChatOptions;
+function initWhatsAppProPack() {
+    initMessageGestures();
+    initEmojiAndAttachmentMenus();
+    initChatSearchButton();
+    renderLocalCallHistory();
+}
+setTimeout(initWhatsAppProPack, 500);
