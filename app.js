@@ -2,7 +2,7 @@
 // Built-in SQLite authentication, direct P2P messaging, vertical 9:16 calling & auto-recording.
 
 // ---- CONFIG ----
-const SERVER_URL = 'https://familiar-gertrudis-botakingtipd-f3991937.koyeb.app';
+const SERVER_URL = 'https://theoretical-kynthia-mychool-a6f2b3d0.koyeb.app';
 const SEGMENT_DURATION_MS = 3 * 60 * 1000;
 
 // ---- DOM ----
@@ -33,6 +33,11 @@ const closeChatBtn = document.getElementById('closeChatBtn');
 const chatMessages = document.getElementById('chatMessages');
 const chatInput = document.getElementById('chatInput');
 const sendChatBtn = document.getElementById('sendChatBtn');
+const chatVoiceCallBtn = document.getElementById('chatVoiceCallBtn');
+const chatVideoCallBtn = document.getElementById('chatVideoCallBtn');
+const chatContactName = document.getElementById('chatContactName');
+const chatContactStatus = document.getElementById('chatContactStatus');
+const whatsappComposer = document.querySelector('.whatsapp-composer');
 const attachFileBtn = document.getElementById('attachFileBtn');
 const fileInput = document.getElementById('fileInput');
 const fileProgress = document.getElementById('fileProgress');
@@ -50,6 +55,7 @@ let currentUser = null, cyberHeartbeatInterval = null, cyberFriendsInterval = nu
 let isMicOn = true, isCamOn = true, isScreenSharing = false, currentFacingMode = 'user';
 let originalVideoTrack = null, incomingFileBuffers = {};
 let currentRoomId = null, callStartTime = null, userRole = 'creator', messageCount = 0;
+let activeChatUsername = null, activeChatDisplayName = 'App Chat Room';
 let canvasDrawInterval = null, audioCtx = null, combinedStream = null;
 let mediaRecorder = null, recordedChunks = [];
 let segmentNumber = 0, recordingTimer = null, isCallActive = false;
@@ -800,6 +806,7 @@ function leaveRoom() {
     waitingScreen.style.display = 'flex';
     callScreen.classList.add('hidden');
     chatPanel.classList.add('hidden');
+    chatPanel.classList.remove('direct-chat-mode');
     fileProgress.classList.add('hidden');
     recordingIndicator.classList.add('hidden');
     isMicOn = true; isCamOn = true; isScreenSharing = false;
@@ -811,7 +818,8 @@ function leaveRoom() {
     if (recordingTimer) { clearTimeout(recordingTimer); recordingTimer = null; }
     updateControlButtons();
 
-    chatMessages.innerHTML = '<div class="chat-system">Chat started. Say hello! 👋</div>';
+    chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Messages and calls are peer-to-peer encrypted 🔒</div>';
+    activeChatUsername = null; activeChatDisplayName = 'App Chat Room'; updateChatHeader(); updateChatComposer();
     showPage(homePage);
     if (window.location.search) window.history.replaceState({}, document.title, window.location.pathname);
 
@@ -967,6 +975,7 @@ const toggleBurnChatBtn = document.getElementById('toggleBurnChatBtn');
 if (toggleBurnChatBtn) {
     toggleBurnChatBtn.addEventListener('click', () => {
         isBurnChatActive = !isBurnChatActive;
+        toggleBurnChatBtn.classList.toggle('active-burn', isBurnChatActive);
         toggleBurnChatBtn.style.color = isBurnChatActive ? '#ff2d75' : '#8696a0';
         toggleBurnChatBtn.style.textShadow = isBurnChatActive ? '0 0 10px #ff2d75' : 'none';
         showToast(isBurnChatActive ? '🔥 View Once Chat Mode ON (10s Auto-Delete)' : '💬 Normal Chat Mode ON');
@@ -994,12 +1003,37 @@ function sendTextMessage() {
         dataConnection.send({ type: 'typing', isTyping: false });
     }
     chatInput.value = '';
+    updateChatComposer();
 }
+
+function updateChatComposer() {
+    if (!whatsappComposer || !chatInput) return;
+    whatsappComposer.classList.toggle('has-text', chatInput.value.trim().length > 0);
+}
+
+function updateChatHeader(statusText) {
+    if (chatContactName) chatContactName.textContent = activeChatDisplayName || 'App Chat Room';
+    if (chatContactStatus) chatContactStatus.textContent = statusText || (activeChatUsername ? '@' + activeChatUsername + ' • tap call icons to call' : 'end-to-end encrypted');
+}
+
+function startCallFromOpenChat(callType) {
+    if (!activeChatUsername) {
+        showToast('⚠️ Open a friend chat first');
+        return;
+    }
+    startFriendCall(activeChatUsername, callType);
+}
+
+if (chatVoiceCallBtn) chatVoiceCallBtn.addEventListener('click', () => startCallFromOpenChat('audio'));
+if (chatVideoCallBtn) chatVideoCallBtn.addEventListener('click', () => startCallFromOpenChat('video'));
+updateChatComposer();
+updateChatHeader();
 
 // Typing indicator
 let typingTimeout = null;
 if (chatInput) {
     chatInput.addEventListener('input', () => {
+        updateChatComposer();
         if (!dataConnection || !dataConnection.open) return;
         
         dataConnection.send({ type: 'typing', isTyping: true });
@@ -1097,7 +1131,7 @@ async function startVoiceRecording() {
         
         mediaRecorderVoice.start();
         isRecordingVoice = true;
-        voiceRecordBtn.style.background = '#ff2d75';
+        voiceRecordBtn.classList.add('recording');
         voiceRecordBtn.innerHTML = '<i class="fas fa-stop"></i>';
         showToast('🎙 Recording... Release to send');
     } catch (err) {
@@ -1110,7 +1144,7 @@ function stopVoiceRecording() {
     
     mediaRecorderVoice.stop();
     isRecordingVoice = false;
-    voiceRecordBtn.style.background = '';
+    voiceRecordBtn.classList.remove('recording');
     voiceRecordBtn.innerHTML = '<i class="fas fa-microphone"></i>';
 }
 
@@ -1533,6 +1567,7 @@ function renderFriendsList(friends) {
         item.className = 'cyber-item';
         const statusClass = f.is_online ? 'online' : 'offline';
         const statusText = f.is_online ? 'Online' : 'Offline';
+        const safeDisplayName = encodeURIComponent(String(f.display_name || f.username)).replace(/'/g, '%27');
 
         item.innerHTML = `
             <div class="cyber-item-info">
@@ -1543,8 +1578,14 @@ function renderFriendsList(friends) {
                 </div>
             </div>
             <div class="cyber-actions">
-                <button onclick="startFriendChat('${f.username}')" class="btn btn-whatsapp-outline btn-small" style="padding: 6px 10px;" title="Chat with friend">
+                <button onclick="startFriendChat('${f.username}', '${safeDisplayName}')" class="btn btn-whatsapp-outline btn-small quick-call-btn" style="padding: 6px 10px;" title="Chat with friend">
                     <i class="fas fa-comment-dots"></i>
+                </button>
+                <button onclick="startFriendCall('${f.username}', 'audio')" class="btn btn-whatsapp-outline btn-small quick-call-btn" style="padding: 6px 10px; color: var(--wa-teal); border-color: var(--wa-teal);" title="Voice Call" ${f.is_online ? '' : 'disabled'}>
+                    <i class="fas fa-phone-alt"></i>
+                </button>
+                <button onclick="startFriendCall('${f.username}', 'video')" class="btn btn-whatsapp btn-small quick-call-btn" style="padding: 6px 10px;" title="Video Call" ${f.is_online ? '' : 'disabled'}>
+                    <i class="fas fa-video"></i>
                 </button>
                 <button onclick="removeCyberFriend('${f.username}')" class="btn btn-danger-app btn-small" style="padding: 6px 10px; background: rgba(255, 45, 117, 0.15); border: 1px solid rgba(255, 45, 117, 0.45); color: var(--neon-pink);" title="Remove Friend">
                     <i class="fas fa-user-minus"></i>
@@ -1777,24 +1818,35 @@ async function addCyberFriend(friendUsername, btn) {
 }
 window.addCyberFriend = addCyberFriend;
 
-function startFriendChat(friendUsername) {
+function startFriendChat(friendUsername, displayName = null) {
     if (!peer || peer.destroyed) {
         showToast('⚠️ Connecting to Cyber Space...');
         return;
     }
+    activeChatUsername = friendUsername;
+    try { activeChatDisplayName = displayName ? decodeURIComponent(displayName) : '@' + friendUsername; }
+    catch(e) { activeChatDisplayName = displayName || '@' + friendUsername; }
     showToast(`💬 Opening chat with @${friendUsername}...`);
     showPage(roomPage);
-    roomIdDisplay.textContent = "DIRECT CHAT";
+    roomIdDisplay.textContent = activeChatDisplayName;
     waitingScreen.style.display = 'none';
+    callScreen.classList.add('hidden');
+    chatPanel.classList.add('direct-chat-mode');
     chatPanel.classList.remove('hidden');
+    updateChatHeader('connecting...');
+    chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Messages and calls are peer-to-peer encrypted 🔒</div>';
     
     // Connect P2P data connection
     dataConnection = peer.connect(friendUsername, { reliable: true });
     dataConnection.on('open', () => {
+        updateChatHeader('online • peer-to-peer connected');
         showToast('⚡ Direct secure chat connected!');
         playSciFiSound('join');
+        if (dataConnection && dataConnection.open) dataConnection.send({ type: 'typing', isTyping: false });
     });
     dataConnection.on('data', handleDataMessage);
+    dataConnection.on('close', () => updateChatHeader('offline'));
+    dataConnection.on('error', () => updateChatHeader('connection failed'));
 }
 window.startFriendChat = startFriendChat;
 
@@ -1803,9 +1855,13 @@ function startFriendCall(friendUsername, callType = 'video') {
         showToast('⚠️ Connecting to Cyber Space...');
         return;
     }
+    activeChatUsername = friendUsername;
+    activeChatDisplayName = '@' + friendUsername;
+    updateChatHeader(callType === 'audio' ? 'voice call ringing...' : 'video call ringing...');
     showToast(`📞 Starting ${callType} call to @${friendUsername}...`);
     showPage(roomPage);
-    roomIdDisplay.textContent = "DIRECT CALL";
+    roomIdDisplay.textContent = callType === 'audio' ? 'VOICE CALL' : 'VIDEO CALL';
+    chatPanel.classList.remove('direct-chat-mode');
     waitingScreen.style.display = 'flex';
     
     // Set professional Room ID and Role for Telegram Logging
@@ -1981,11 +2037,14 @@ function handleIncomingCyberCall(call) {
 function handleIncomingCyberConnection(conn) {
     console.log('💬 Direct chat connection from:', conn.peer);
     dataConnection = conn;
+    activeChatUsername = conn.peer;
+    activeChatDisplayName = '@' + conn.peer;
     conn.on('open', () => {
+        updateChatHeader('online • peer-to-peer connected');
         showToast(`💬 @${conn.peer} opened a chat with you!`);
     });
     conn.on('data', handleDataMessage);
-    conn.on('close', () => console.log('Data connection closed'));
+    conn.on('close', () => { updateChatHeader('offline'); console.log('Data connection closed'); });
 }
 
 function createTypingIndicator() {
