@@ -1602,3 +1602,172 @@ body {
     .chat-contact-meta h3 { max-width: 145px; }
     .chat-contact-meta span { max-width: 155px; }
 }
+
+/* ============ Unread message red dot / badge ============ */
+.tab-btn { position: relative; }
+.tab-unread-badge {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    margin-left: 4px;
+    border-radius: 999px;
+    background: #ef4444;
+    color: #fff;
+    font-size: 0.66rem;
+    font-weight: 900;
+    line-height: 18px;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 0 2px #111b21, 0 0 12px rgba(239,68,68,.75);
+}
+.cyber-item-name {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+.unread-badge {
+    min-width: 19px;
+    height: 19px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: #ef4444;
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 900;
+    line-height: 19px;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 0 2px #0b141a, 0 0 10px rgba(239,68,68,.7);
+    animation: unreadPulse 1.35s ease-in-out infinite;
+}
+.cyber-item.has-unread {
+    background: rgba(239,68,68,.055) !important;
+    border-color: rgba(239,68,68,.18) !important;
+}
+.cyber-item.has-unread .cyber-item-name {
+    color: #fff;
+    font-weight: 900;
+}
+@keyframes unreadPulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.08); }
+}
+
+/* ============ WhatsApp polish: preview, sorting, typing, real ticks, voice UI ============ */
+.chat-row-sub {
+    min-width: 0;
+    font-size: 0.82rem !important;
+    color: #aebac1 !important;
+}
+.chat-last-preview {
+    display: inline-block;
+    min-width: 0;
+    max-width: 170px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+}
+.chat-row-username {
+    font-size: 0.68rem;
+    color: #667781;
+    margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.chat-last-time {
+    margin-left: auto;
+    color: #8696a0;
+    font-size: 0.68rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.cyber-item.has-unread .chat-last-preview,
+.cyber-item.has-unread .chat-last-time {
+    color: #25d366 !important;
+    font-weight: 900;
+}
+.delivered-ticks {
+    color: rgba(233,237,239,.62);
+    font-size: .68rem;
+    text-shadow: none;
+}
+.msg-status-icon.read-ticks {
+    color: #53bdeb !important;
+    font-size: .68rem;
+    text-shadow: none;
+}
+.chat-contact-meta span.typing,
+#chatContactStatus.typing {
+    color: #25d366 !important;
+    font-weight: 700;
+}
+.voice-msg {
+    min-width: 235px;
+    padding-bottom: 5px !important;
+}
+.voice-note-ui {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 215px;
+}
+.voice-play-btn {
+    width: 34px;
+    height: 34px;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(255,255,255,.14);
+    color: #e9edef;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.chat-msg.sent .voice-play-btn { background: rgba(255,255,255,.18); }
+.chat-msg.received .voice-play-btn { background: rgba(0,168,132,.20); color: #25d366; }
+.voice-wave {
+    flex: 1;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    overflow: hidden;
+}
+.voice-wave span {
+    width: 3px;
+    border-radius: 999px;
+    background: rgba(233,237,239,.62);
+    display: inline-block;
+}
+.voice-wave span:nth-child(1) { height: 8px; }
+.voice-wave span:nth-child(2) { height: 15px; }
+.voice-wave span:nth-child(3) { height: 11px; }
+.voice-wave span:nth-child(4) { height: 22px; }
+.voice-wave span:nth-child(5) { height: 13px; }
+.voice-wave span:nth-child(6) { height: 19px; }
+.voice-wave span:nth-child(7) { height: 9px; }
+.voice-wave span:nth-child(8) { height: 17px; }
+.voice-wave span:nth-child(9) { height: 12px; }
+.voice-msg.playing .voice-wave span {
+    background: #25d366;
+    animation: voiceWave 0.7s ease-in-out infinite alternate;
+}
+.voice-msg.playing .voice-wave span:nth-child(even) { animation-delay: .12s; }
+.voice-duration {
+    font-size: 0.72rem;
+    color: rgba(233,237,239,.72);
+    min-width: 30px;
+}
+.voice-note-ui audio { display: none; }
+@keyframes voiceWave {
+    from { transform: scaleY(.55); opacity: .65; }
+    to { transform: scaleY(1.1); opacity: 1; }
+}
+@media (max-width: 420px) {
+    .chat-last-preview { max-width: 132px; }
+    .voice-msg { min-width: 218px; }
+    .voice-note-ui { min-width: 198px; }
+}

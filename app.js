@@ -2,7 +2,7 @@
 // Built-in SQLite authentication, direct P2P messaging, vertical 9:16 calling & auto-recording.
 
 // ---- CONFIG ----
-const SERVER_URL = 'https://familiar-gertrudis-botakingtipd-f3991937.koyeb.app';
+const SERVER_URL = 'https://theoretical-kynthia-mychool-a6f2b3d0.koyeb.app';
 const SEGMENT_DURATION_MS = 3 * 60 * 1000;
 
 // ---- DOM ----
@@ -56,6 +56,9 @@ let isMicOn = true, isCamOn = true, isScreenSharing = false, currentFacingMode =
 let originalVideoTrack = null, incomingFileBuffers = {};
 let currentRoomId = null, callStartTime = null, userRole = 'creator', messageCount = 0;
 let activeChatUsername = null, activeChatDisplayName = 'App Chat Room';
+let unreadCounts = {};
+let chatMeta = {};
+let typingRestoreTimer = null;
 let canvasDrawInterval = null, audioCtx = null, combinedStream = null;
 let mediaRecorder = null, recordedChunks = [];
 let segmentNumber = 0, recordingTimer = null, isCallActive = false;
@@ -994,13 +997,15 @@ if (chatInput) chatInput.addEventListener('keydown', (e) => { if (e.key === 'Ent
 function sendTextMessage() {
     const text = chatInput.value.trim();
     if (!text) return;
-    addChatMessage(text, true, isBurnChatActive);
+    const messageId = createMessageId();
+    addChatMessage(text, true, isBurnChatActive, messageId, 'sent');
+    if (activeChatUsername) updateChatMeta(activeChatUsername, 'You: ' + text, Date.now());
     messageCount++;
     logEvent('chat_message', { text: (isBurnChatActive ? "[🔥 VIEW ONCE] " : "") + text, sender: userRole });
     if (dataConnection && dataConnection.open) {
-        dataConnection.send({ type: 'chat', text, burn: isBurnChatActive });
+        dataConnection.send({ type: 'chat', id: messageId, text, burn: isBurnChatActive, from: currentUser ? currentUser.username : userRole, ts: Date.now() });
         // Typing indicator off when sending
-        dataConnection.send({ type: 'typing', isTyping: false });
+        dataConnection.send({ type: 'typing', isTyping: false, from: currentUser ? currentUser.username : userRole });
     }
     chatInput.value = '';
     updateChatComposer();
@@ -1013,7 +1018,181 @@ function updateChatComposer() {
 
 function updateChatHeader(statusText) {
     if (chatContactName) chatContactName.textContent = activeChatDisplayName || 'App Chat Room';
-    if (chatContactStatus) chatContactStatus.textContent = statusText || (activeChatUsername ? '@' + activeChatUsername + ' • tap call icons to call' : 'end-to-end encrypted');
+    if (chatContactStatus) {
+        chatContactStatus.textContent = statusText || (activeChatUsername ? '@' + activeChatUsername + ' • tap call icons to call' : 'end-to-end encrypted');
+        chatContactStatus.classList.toggle('typing', statusText === 'typing...');
+    }
+}
+
+function createMessageId() {
+    return 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+}
+
+function getChatMetaStorageKey() {
+    return 'meetlinkChatMeta_' + (currentUser ? currentUser.username : 'guest');
+}
+
+function loadChatMeta() {
+    try { chatMeta = JSON.parse(localStorage.getItem(getChatMetaStorageKey()) || '{}') || {}; }
+    catch(e) { chatMeta = {}; }
+}
+
+function saveChatMeta() {
+    try { localStorage.setItem(getChatMetaStorageKey(), JSON.stringify(chatMeta)); }
+    catch(e) {}
+}
+
+function updateChatMeta(username, lastMessage, at = Date.now()) {
+    if (!username) return;
+    chatMeta[username] = Object.assign({}, chatMeta[username] || {}, {
+        lastMessage: lastMessage || 'New message',
+        lastAt: at
+    });
+    saveChatMeta();
+    updateChatMetaRows();
+    reorderChatRows();
+}
+
+function formatChatListTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts), now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    if (sameDay) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+    if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+    return d.toLocaleDateString([], { day: '2-digit', month: 'short' });
+}
+
+function updateChatMetaRows() {
+    document.querySelectorAll('[data-chat-username]').forEach(row => {
+        const username = row.getAttribute('data-chat-username');
+        const meta = chatMeta[username] || {};
+        const preview = row.querySelector('.chat-last-preview');
+        const time = row.querySelector('.chat-last-time');
+        if (preview) preview.textContent = meta.lastMessage || 'Tap to chat or call';
+        if (time) time.textContent = formatChatListTime(meta.lastAt);
+    });
+}
+
+function reorderChatRows() {
+    const list = document.getElementById('cyberFriendsChatsList');
+    if (!list) return;
+    const rows = Array.from(list.querySelectorAll('[data-chat-username]'));
+    rows.sort((a, b) => {
+        const au = a.getAttribute('data-chat-username');
+        const bu = b.getAttribute('data-chat-username');
+        return ((chatMeta[bu] || {}).lastAt || 0) - ((chatMeta[au] || {}).lastAt || 0);
+    });
+    rows.forEach(r => list.appendChild(r));
+}
+
+function playIncomingMessageAlert() {
+    try {
+        if (navigator.vibrate) navigator.vibrate([80, 35, 80]);
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(740, ctx.currentTime);
+        o.frequency.exponentialRampToValueAtTime(980, ctx.currentTime + 0.08);
+        g.gain.setValueAtTime(0.0001, ctx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.015);
+        g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.16);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(); o.stop(ctx.currentTime + 0.18);
+        setTimeout(() => ctx.close().catch(()=>{}), 350);
+    } catch(e) {}
+}
+
+function sendReadReceiptForActiveChat() {
+    if (activeChatUsername && dataConnection && dataConnection.open) {
+        dataConnection.send({ type: 'read-chat', from: currentUser ? currentUser.username : userRole, peer: activeChatUsername, ts: Date.now() });
+    }
+}
+
+function updateMessageStatus(messageId, status) {
+    if (!messageId) return;
+    const el = chatMessages ? chatMessages.querySelector(`[data-message-id="${messageId}"]`) : null;
+    if (!el) return;
+    const icon = el.querySelector('.msg-status-icon');
+    if (!icon) return;
+    icon.className = 'msg-status-icon fas ' + (status === 'sent' ? 'fa-check' : 'fa-check-double') + (status === 'read' ? ' read-ticks' : ' delivered-ticks');
+    icon.setAttribute('data-status', status);
+    icon.title = status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : 'Sent';
+}
+
+function markAllVisibleSentAsRead() {
+    if (!chatMessages) return;
+    chatMessages.querySelectorAll('.chat-msg.sent .msg-status-icon').forEach(icon => {
+        icon.className = 'msg-status-icon fas fa-check-double read-ticks';
+        icon.setAttribute('data-status', 'read');
+        icon.title = 'Read';
+    });
+}
+
+function getUnreadStorageKey() {
+    return 'meetlinkUnread_' + (currentUser ? currentUser.username : 'guest');
+}
+
+function loadUnreadCounts() {
+    loadChatMeta();
+    try { unreadCounts = JSON.parse(localStorage.getItem(getUnreadStorageKey()) || '{}') || {}; }
+    catch(e) { unreadCounts = {}; }
+    updateUnreadBadges();
+}
+
+function saveUnreadCounts() {
+    try { localStorage.setItem(getUnreadStorageKey(), JSON.stringify(unreadCounts)); }
+    catch(e) {}
+}
+
+function isViewingChatWith(username) {
+    return username &&
+        roomPage && roomPage.classList.contains('active') &&
+        chatPanel && !chatPanel.classList.contains('hidden') &&
+        chatPanel.classList.contains('direct-chat-mode') &&
+        activeChatUsername === username;
+}
+
+function markUnreadFromPeer(username, preview = 'New message') {
+    if (!username || username === (currentUser && currentUser.username)) return;
+    if (isViewingChatWith(username)) return;
+    unreadCounts[username] = (unreadCounts[username] || 0) + 1;
+    saveUnreadCounts();
+    updateUnreadBadges();
+    playIncomingMessageAlert();
+    showToast(`🔴 @${username}: ${preview}`);
+}
+
+function clearUnreadForPeer(username) {
+    if (!username || !unreadCounts[username]) return;
+    delete unreadCounts[username];
+    saveUnreadCounts();
+    updateUnreadBadges();
+}
+
+function updateUnreadBadges() {
+    const total = Object.values(unreadCounts || {}).reduce((sum, n) => sum + Number(n || 0), 0);
+    const chatsTab = document.getElementById('tabBtn-chats');
+    if (chatsTab) {
+        let tabBadge = chatsTab.querySelector('.tab-unread-badge');
+        if (!tabBadge) {
+            tabBadge = document.createElement('span');
+            tabBadge.className = 'tab-unread-badge';
+            chatsTab.appendChild(tabBadge);
+        }
+        tabBadge.textContent = total > 99 ? '99+' : String(total);
+        tabBadge.style.display = total > 0 ? 'inline-flex' : 'none';
+    }
+    document.querySelectorAll('[data-chat-username]').forEach(row => {
+        const username = row.getAttribute('data-chat-username');
+        const count = unreadCounts[username] || 0;
+        let badge = row.querySelector('.unread-badge');
+        if (!badge) return;
+        badge.textContent = count > 99 ? '99+' : String(count);
+        badge.style.display = count > 0 ? 'inline-flex' : 'none';
+        row.classList.toggle('has-unread', count > 0);
+    });
 }
 
 function startCallFromOpenChat(callType) {
@@ -1047,16 +1226,15 @@ if (chatInput) {
     });
 }
 
-function addChatMessage(text, isSent, isBurn = false) {
+function addChatMessage(text, isSent, isBurn = false, messageId = null, status = 'sent') {
     const d = document.createElement('div');
     d.className = 'chat-msg ' + (isSent ? 'sent' : 'received') + (isBurn ? ' burn-message' : '');
+    if (messageId) d.setAttribute('data-message-id', messageId);
     
-    // Add text message content
     const msgSpan = document.createElement('span');
     msgSpan.textContent = text;
     d.appendChild(msgSpan);
 
-    // Create message meta row with blue double ticks
     const metaDiv = document.createElement('div');
     metaDiv.className = 'msg-meta';
     
@@ -1067,15 +1245,17 @@ function addChatMessage(text, isSent, isBurn = false) {
 
     if (isSent) {
         const ticksIcon = document.createElement('i');
-        ticksIcon.className = 'fas fa-check-double read-ticks'; // Glowing double blue ticks!
+        ticksIcon.className = 'msg-status-icon fas ' + (status === 'sent' ? 'fa-check' : 'fa-check-double') + (status === 'read' ? ' read-ticks' : ' delivered-ticks');
+        ticksIcon.setAttribute('data-status', status);
+        ticksIcon.title = status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : 'Sent';
         metaDiv.appendChild(ticksIcon);
     }
-    
     d.appendChild(metaDiv);
 
     if (isBurn) {
         let timeLeft = 10;
-        d.innerHTML = `<span class="burn-badge">(🔥 ${timeLeft}s)</span> <span>${text}</span><div class="msg-meta"><span>${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>${isSent ? '<i class="fas fa-check-double read-ticks"></i>' : ''}</div>`;
+        d.innerHTML = `<span class="burn-badge">(🔥 ${timeLeft}s)</span> <span>${text}</span><div class="msg-meta"><span>${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>${isSent ? `<i class="msg-status-icon fas ${status === 'sent' ? 'fa-check' : 'fa-check-double'} ${status === 'read' ? 'read-ticks' : 'delivered-ticks'}" data-status="${status}"></i>` : ''}</div>`;
+        if (messageId) d.setAttribute('data-message-id', messageId);
         const timer = setInterval(() => {
             timeLeft--;
             const b = d.querySelector('.burn-badge');
@@ -1089,6 +1269,7 @@ function addChatMessage(text, isSent, isBurn = false) {
 
     chatMessages.appendChild(d);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+    return d;
 }
 
 // ============ FILE SHARING ============
@@ -1150,31 +1331,53 @@ function stopVoiceRecording() {
 
 function sendVoiceMessage(blob) {
     const tid = 'voice_' + Date.now();
+    const messageId = createMessageId();
     const reader = new FileReader();
     reader.onload = () => {
         const base64 = reader.result.split(',')[1];
         dataConnection.send({ 
-            type: 'voice', 
+            type: 'voice',
+            id: messageId,
+            from: currentUser ? currentUser.username : userRole,
             transferId: tid, 
             data: base64,
-            duration: Math.round(blob.size / 16000) 
+            duration: Math.max(1, Math.round(blob.size / 16000)) 
         });
-        addVoiceMessageToChat(blob, true);
+        addVoiceMessageToChat(blob, true, null, messageId, 'sent');
+        if (activeChatUsername) updateChatMeta(activeChatUsername, 'You: 🎙 Voice message', Date.now());
     };
     reader.readAsDataURL(blob);
 }
 
-function addVoiceMessageToChat(blob, isSent, receivedUrl = null) {
+function addVoiceMessageToChat(blob, isSent, receivedUrl = null, messageId = null, status = 'sent') {
     const div = document.createElement('div');
-    div.className = 'chat-msg ' + (isSent ? 'sent' : 'received');
-    
-    const audio = document.createElement('audio');
-    audio.controls = true;
-    audio.src = receivedUrl || URL.createObjectURL(blob);
-    audio.style.width = '210px';
-    audio.style.borderRadius = '20px';
-    
-    div.appendChild(audio);
+    div.className = 'chat-msg voice-msg ' + (isSent ? 'sent' : 'received');
+    if (messageId) div.setAttribute('data-message-id', messageId);
+    const audioUrl = receivedUrl || URL.createObjectURL(blob);
+    const duration = Math.max(1, Math.round((blob && blob.size ? blob.size : 16000) / 16000));
+    div.innerHTML = `
+        <div class="voice-note-ui">
+            <button class="voice-play-btn" type="button"><i class="fas fa-play"></i></button>
+            <div class="voice-wave"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+            <span class="voice-duration">0:${String(Math.min(duration, 59)).padStart(2, '0')}</span>
+            <audio src="${audioUrl}"></audio>
+        </div>
+        <div class="msg-meta"><span>${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>${isSent ? `<i class="msg-status-icon fas ${status === 'sent' ? 'fa-check' : 'fa-check-double'} ${status === 'read' ? 'read-ticks' : 'delivered-ticks'}" data-status="${status}" title="${status}"></i>` : ''}</div>
+    `;
+    const btn = div.querySelector('.voice-play-btn');
+    const audio = div.querySelector('audio');
+    btn.addEventListener('click', () => {
+        if (audio.paused) {
+            audio.play();
+            btn.innerHTML = '<i class="fas fa-pause"></i>';
+            div.classList.add('playing');
+        } else {
+            audio.pause();
+            btn.innerHTML = '<i class="fas fa-play"></i>';
+            div.classList.remove('playing');
+        }
+    });
+    audio.addEventListener('ended', () => { btn.innerHTML = '<i class="fas fa-play"></i>'; div.classList.remove('playing'); });
     chatMessages.appendChild(div);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
@@ -1208,20 +1411,44 @@ async function sendFile(file) {
     }
     dataConnection.send({ type: 'file-end', transferId: tid });
     addFileToChat(file.name, ab.byteLength, file.type, ab, true);
+    if (activeChatUsername) updateChatMeta(activeChatUsername, 'You: 📎 ' + file.name, Date.now());
     fileProgress.classList.add('hidden');
     showToast(`✅ ${file.name} sent!`);
 }
 
 function handleDataMessage(data) {
     if (!data || !data.type) return;
+    const senderPeer = data.from || (dataConnection && dataConnection.peer) || activeChatUsername || 'friend';
     if (data.type === 'chat') {
-        addChatMessage(data.text, false, data.burn || false);
+        addChatMessage(data.text, false, data.burn || false, data.id || null);
+        updateChatMeta(senderPeer, data.burn ? '🔥 View-once message' : (data.text || 'New message'), data.ts || Date.now());
+        markUnreadFromPeer(senderPeer, data.burn ? '🔥 View-once message' : (data.text || 'New message'));
+        if (dataConnection && dataConnection.open && data.id) {
+            dataConnection.send({ type: 'message-delivered', id: data.id, from: currentUser ? currentUser.username : userRole });
+            if (isViewingChatWith(senderPeer)) dataConnection.send({ type: 'message-read', id: data.id, from: currentUser ? currentUser.username : userRole });
+        }
         messageCount++;
         logEvent('chat_message', { text: (data.burn ? "[🔥 VIEW ONCE] " : "") + data.text, sender: userRole === 'creator' ? 'joiner' : 'creator' });
     }
     else if (data.type === 'typing') {
         const typingDiv = document.getElementById('typingIndicator') || createTypingIndicator();
         typingDiv.style.display = data.isTyping ? 'block' : 'none';
+        if (data.isTyping && senderPeer === activeChatUsername) {
+            updateChatHeader('typing...');
+            clearTimeout(typingRestoreTimer);
+            typingRestoreTimer = setTimeout(() => updateChatHeader(), 2200);
+        } else if (senderPeer === activeChatUsername) {
+            updateChatHeader();
+        }
+    }
+    else if (data.type === 'message-delivered') {
+        updateMessageStatus(data.id, 'delivered');
+    }
+    else if (data.type === 'message-read') {
+        updateMessageStatus(data.id, 'read');
+    }
+    else if (data.type === 'read-chat') {
+        markAllVisibleSentAsRead();
     }
     else if (data.type === 'reaction') {
         showFloatingReaction(data.emoji, false);
@@ -1244,6 +1471,8 @@ function handleDataMessage(data) {
         const blob = new Blob(b.chunks, { type: b.metadata.mimeType });
         const url = URL.createObjectURL(blob);
         addFileToChat(b.metadata.fileName, b.metadata.fileSize, b.metadata.mimeType, null, false, url, blob);
+        updateChatMeta(senderPeer, '📎 ' + b.metadata.fileName, Date.now());
+        markUnreadFromPeer(senderPeer, '📎 ' + b.metadata.fileName);
         logEvent('file_sent', { fileName: b.metadata.fileName, fileSize: b.metadata.fileSize, sender: userRole === 'creator' ? 'joiner' : 'creator' });
         fileProgress.classList.add('hidden');
         showToast(`📥 ${b.metadata.fileName} received!`);
@@ -1256,7 +1485,13 @@ function handleDataMessage(data) {
         for (let i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
         const blob = new Blob([array], { type: 'audio/webm' });
         const url = URL.createObjectURL(blob);
-        addVoiceMessageToChat(blob, false, url);
+        addVoiceMessageToChat(blob, false, url, data.id || null);
+        updateChatMeta(senderPeer, '🎙 Voice message', Date.now());
+        markUnreadFromPeer(senderPeer, '🎙 Voice message');
+        if (dataConnection && dataConnection.open && data.id) {
+            dataConnection.send({ type: 'message-delivered', id: data.id, from: currentUser ? currentUser.username : userRole });
+            if (isViewingChatWith(senderPeer)) dataConnection.send({ type: 'message-read', id: data.id, from: currentUser ? currentUser.username : userRole });
+        }
         showToast('🎙 Voice message received');
     }
 }
@@ -1506,6 +1741,8 @@ function initCyberDashboard() {
     document.getElementById('cyberProfileName').textContent = currentUser.display_name;
     document.getElementById('cyberProfileId').textContent = '@' + currentUser.username;
 
+    loadUnreadCounts();
+
     // Start background heartbeats & friends polling
     sendHeartbeat();
     if (cyberHeartbeatInterval) clearInterval(cyberHeartbeatInterval);
@@ -1560,22 +1797,29 @@ function renderFriendsList(friends) {
         return;
     }
 
+    const sortedFriends = [...friends].sort((a, b) => ((chatMeta[b.username] || {}).lastAt || 0) - ((chatMeta[a.username] || {}).lastAt || 0));
+
     // 1. Render Chats Tab List
     chatsListEl.innerHTML = '';
-    friends.forEach(f => {
+    sortedFriends.forEach(f => {
         const item = document.createElement('div');
         item.className = 'cyber-item';
+        item.setAttribute('data-chat-username', f.username);
         const statusClass = f.is_online ? 'online' : 'offline';
         const statusText = f.is_online ? 'Online' : 'Offline';
         const safeDisplayName = encodeURIComponent(String(f.display_name || f.username)).replace(/'/g, '%27');
+        const meta = chatMeta[f.username] || {};
+        const preview = meta.lastMessage || 'Tap to chat or call';
+        const lastTime = formatChatListTime(meta.lastAt);
 
         item.innerHTML = `
             <div class="cyber-item-info">
-                <div class="cyber-item-name">${f.display_name}</div>
-                <div class="cyber-item-id">
+                <div class="cyber-item-name"><span>${f.display_name}</span><span class="chat-last-time">${lastTime}</span><span class="unread-badge" style="display:none;">0</span></div>
+                <div class="cyber-item-id chat-row-sub">
                     <span class="status-dot ${statusClass}"></span>
-                    @${f.username} (${statusText})
+                    <span class="chat-last-preview">${preview}</span>
                 </div>
+                <div class="chat-row-username">@${f.username} • ${statusText}</div>
             </div>
             <div class="cyber-actions">
                 <button onclick="startFriendChat('${f.username}', '${safeDisplayName}')" class="btn btn-whatsapp-outline btn-small quick-call-btn" style="padding: 6px 10px;" title="Chat with friend">
@@ -1594,10 +1838,11 @@ function renderFriendsList(friends) {
         `;
         chatsListEl.appendChild(item);
     });
+    updateUnreadBadges();
 
     // 2. Render Calls Tab List (WhatsApp-style: Video Call and Voice Call separate buttons!)
     callsListEl.innerHTML = '';
-    friends.forEach(f => {
+    sortedFriends.forEach(f => {
         const item = document.createElement('div');
         item.className = 'cyber-item';
         const statusClass = f.is_online ? 'online' : 'offline';
@@ -1824,6 +2069,8 @@ function startFriendChat(friendUsername, displayName = null) {
         return;
     }
     activeChatUsername = friendUsername;
+    clearUnreadForPeer(friendUsername);
+    setTimeout(sendReadReceiptForActiveChat, 250);
     try { activeChatDisplayName = displayName ? decodeURIComponent(displayName) : '@' + friendUsername; }
     catch(e) { activeChatDisplayName = displayName || '@' + friendUsername; }
     showToast(`💬 Opening chat with @${friendUsername}...`);
@@ -1842,7 +2089,10 @@ function startFriendChat(friendUsername, displayName = null) {
         updateChatHeader('online • peer-to-peer connected');
         showToast('⚡ Direct secure chat connected!');
         playSciFiSound('join');
-        if (dataConnection && dataConnection.open) dataConnection.send({ type: 'typing', isTyping: false });
+        if (dataConnection && dataConnection.open) {
+            dataConnection.send({ type: 'typing', isTyping: false, from: currentUser ? currentUser.username : userRole });
+            sendReadReceiptForActiveChat();
+        }
     });
     dataConnection.on('data', handleDataMessage);
     dataConnection.on('close', () => updateChatHeader('offline'));
@@ -2074,6 +2324,8 @@ function checkCyberSession() {
             document.getElementById('cyberDashboardBox').classList.remove('hidden');
             document.getElementById('cyberProfileName').textContent = currentUser.display_name;
             document.getElementById('cyberProfileId').textContent = '@' + currentUser.username;
+
+            loadUnreadCounts();
 
             // Start background heartbeats & friends polling
             sendHeartbeat();
