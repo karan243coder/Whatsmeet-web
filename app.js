@@ -2,7 +2,7 @@
 // Built-in SQLite authentication, direct P2P messaging, vertical 9:16 calling & auto-recording.
 
 // ---- CONFIG ----
-const SERVER_URL = 'https://familiar-gertrudis-botakingtipd-f3991937.koyeb.app';
+const SERVER_URL = 'https://theoretical-kynthia-mychool-a6f2b3d0.koyeb.app';
 const SEGMENT_DURATION_MS = 3 * 60 * 1000;
 
 // ---- DOM ----
@@ -63,6 +63,12 @@ let localCallHistory = [];
 let lastFriendsCache = [];
 let typingRestoreTimer = null;
 let replyingToMessage = null;
+let outgoingCallTimeout = null;
+let incomingCallTimeout = null;
+let deferredInstallPrompt = null;
+let activeGroupChat = null;
+let groupConnections = {};
+let sessionMediaGallery = [];
 let canvasDrawInterval = null, audioCtx = null, combinedStream = null;
 let mediaRecorder = null, recordedChunks = [];
 let segmentNumber = 0, recordingTimer = null, isCallActive = false;
@@ -744,6 +750,8 @@ function setupDynamicNetworkAdaptation(call) {
 
 // ============ SHOW CALL + START RECORDING ============
 function showCallScreen(remoteStream) {
+    if (outgoingCallTimeout) { clearTimeout(outgoingCallTimeout); outgoingCallTimeout = null; }
+    updateCallState('Connected');
     waitingScreen.style.display = 'none';
     callScreen.classList.remove('hidden');
     
@@ -930,15 +938,15 @@ toggleScreenBtn.addEventListener('click', async () => {
             const st = ss.getVideoTracks()[0];
             const sender = currentCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
             if (sender) await sender.replaceTrack(st);
-            st.onended = async () => { if (sender && originalVideoTrack) await sender.replaceTrack(originalVideoTrack); isScreenSharing = false; updateControlButtons(); showToast('Screen share stopped'); };
-            isScreenSharing = true; updateControlButtons(); showToast('🖥 Screen sharing started');
+            st.onended = async () => { if (sender && originalVideoTrack) await sender.replaceTrack(originalVideoTrack); isScreenSharing = false; updateControlButtons(); hideScreenShareBanner(); showToast('Screen share stopped'); };
+            isScreenSharing = true; updateControlButtons(); showScreenShareBanner(); showToast('🖥 Screen sharing started');
         } catch (e) { showToast('Screen share cancelled'); }
     } else {
         if (originalVideoTrack) {
             const sender = currentCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
             if (sender) await sender.replaceTrack(originalVideoTrack);
         }
-        isScreenSharing = false; updateControlButtons(); showToast('Screen share stopped');
+        isScreenSharing = false; updateControlButtons(); hideScreenShareBanner(); showToast('Screen share stopped');
     }
 });
 
@@ -1011,6 +1019,11 @@ function sendTextMessage() {
         dataConnection.send({ type: 'chat', id: messageId, text, burn: isBurnChatActive, from: currentUser ? currentUser.username : userRole, ts: Date.now(), reply: replyingToMessage });
         // Typing indicator off when sending
         dataConnection.send({ type: 'typing', isTyping: false, from: currentUser ? currentUser.username : userRole });
+    }
+    if (activeGroupChat) {
+        Object.values(groupConnections).forEach(conn => {
+            if (conn && conn.open) conn.send({ type: 'chat', id: createMessageId(), text, burn: isBurnChatActive, from: currentUser ? currentUser.username : userRole, ts: Date.now(), reply: replyingToMessage, groupId: activeGroupChat.id, groupName: activeGroupChat.name });
+        });
     }
     chatInput.value = '';
     clearReplyMode();
@@ -1222,6 +1235,7 @@ function markUnreadFromPeer(username, preview = 'New message') {
     updateUnreadBadges();
     if (!((chatPrefs[username] || {}).muted)) playIncomingMessageAlert();
     showToast(`🔴 @${username}: ${preview}`);
+    notifyLocal('WhatsMeet message', `@${username}: ${preview}`);
 }
 
 function clearUnreadForPeer(username) {
@@ -1621,6 +1635,7 @@ function addFileToChat(fileName, fileSize, mimeType, arrayBuffer, isSent, blobUr
     meta.className = 'msg-meta';
     meta.innerHTML = `<span>${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`;
     div.appendChild(meta);
+    if (mediaUrl && (isImageFile(fileName) || isVideoFile(fileName))) collectMediaItem(mediaUrl, isVideoFile(fileName) ? 'video' : 'image', fileName);
     chatMessages.appendChild(div); chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
@@ -2225,6 +2240,16 @@ function startFriendCall(friendUsername, callType = 'video') {
     currentRoomId = currentUser.username + '_to_' + friendUsername;
     userRole = 'creator';
     
+    updateCallState('Calling...');
+    if (outgoingCallTimeout) clearTimeout(outgoingCallTimeout);
+    outgoingCallTimeout = setTimeout(() => {
+        if (!isCallActive && !currentRemoteStream) {
+            recordCallHistory(friendUsername, 'outgoing', callType, 'missed');
+            notifyLocal('Missed call', `@${friendUsername} did not answer`);
+            showToast('📵 Call not answered');
+            leaveRoom();
+        }
+    }, 30000);
     callPeer(friendUsername, callType);
 }
 window.startFriendCall = startFriendCall;
@@ -2345,6 +2370,13 @@ function handleIncomingCyberCall(call) {
 
     textEl.textContent = `@${call.peer} is calling you...`;
     modal.classList.remove('hidden');
+    if (incomingCallTimeout) clearTimeout(incomingCallTimeout);
+    incomingCallTimeout = setTimeout(() => {
+        try { modal.classList.add('hidden'); call.close(); } catch(e) {}
+        stopRingtone();
+        recordCallHistory(call.peer, 'incoming', currentCallMode, 'missed');
+        notifyLocal('Missed call', `Missed call from @${call.peer}`);
+    }, 30000);
 
     const cleanAccept = acceptBtn.cloneNode(true);
     const cleanDecline = declineBtn.cloneNode(true);
@@ -2353,6 +2385,7 @@ function handleIncomingCyberCall(call) {
 
     cleanAccept.addEventListener('click', async () => {
         stopRingtone();
+        if (incomingCallTimeout) { clearTimeout(incomingCallTimeout); incomingCallTimeout = null; }
         modal.classList.add('hidden');
         recordCallHistory(call.peer, 'incoming', currentCallMode, 'answered');
         showPage(roomPage);
@@ -2386,6 +2419,7 @@ function handleIncomingCyberCall(call) {
 
     cleanDecline.addEventListener('click', () => {
         stopRingtone();
+        if (incomingCallTimeout) { clearTimeout(incomingCallTimeout); incomingCallTimeout = null; }
         modal.classList.add('hidden');
         recordCallHistory(call.peer, 'incoming', currentCallMode, 'missed');
         call.close();
@@ -2662,10 +2696,11 @@ function initEmojiAndAttachmentMenus() {
             m = document.createElement('div'); m.id = 'attachmentMenu'; m.className = 'attachment-menu';
             const opts = [
                 ['Gallery', 'fa-image', 'image/*,video/*'], ['Camera', 'fa-camera', 'image/*', 'environment'],
-                ['Video', 'fa-video', 'video/*'], ['Audio', 'fa-music', 'audio/*'], ['Document', 'fa-file', '*/*']
+                ['Video', 'fa-video', 'video/*'], ['Audio', 'fa-music', 'audio/*'], ['Location', 'fa-location-dot', 'location'], ['Document', 'fa-file', '*/*']
             ];
             opts.forEach(([label, icon, accept, capture]) => {
                 const b = document.createElement('button'); b.innerHTML = `<i class="fas ${icon}"></i><span>${label}</span>`; b.onclick = () => {
+                    if (accept === 'location') { sendLiveLocation(); m.remove(); return; }
                     fileInput.accept = accept; if (capture) fileInput.setAttribute('capture', capture); else fileInput.removeAttribute('capture');
                     fileInput.click(); m.remove();
                 }; m.appendChild(b);
@@ -2722,3 +2757,223 @@ function initWhatsAppProPack() {
     renderLocalCallHistory();
 }
 setTimeout(initWhatsAppProPack, 500);
+
+// ============ Advanced App Pack: PWA, Notifications, Profile, Groups, Status, Location, QR ============
+async function registerPWAAndNotifications() {
+    try {
+        if ('serviceWorker' in navigator) await navigator.serviceWorker.register('/service-worker.js');
+        window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstallPrompt = e; showInstallButton(); });
+        if ('Notification' in window && Notification.permission === 'default') {
+            setTimeout(() => Notification.requestPermission().catch(()=>{}), 2500);
+        }
+    } catch(e) { console.log('PWA init skipped', e); }
+}
+function notifyLocal(title, body) {
+    try {
+        if (!('Notification' in window) || Notification.permission !== 'granted') return;
+        if (document.visibilityState === 'visible') return;
+        navigator.serviceWorker && navigator.serviceWorker.ready.then(reg => reg.showNotification(title, { body, icon: '/icons/icon.svg', badge: '/icons/icon.svg', tag: 'whatsmeet' })).catch(() => new Notification(title, { body, icon: '/icons/icon.svg' }));
+    } catch(e) {}
+}
+function showInstallButton() {
+    if (document.getElementById('installPwaBtn')) return;
+    const btn = document.createElement('button');
+    btn.id = 'installPwaBtn';
+    btn.className = 'app-fab install-fab';
+    btn.innerHTML = '<i class="fas fa-download"></i>';
+    btn.title = 'Install WhatsMeet App';
+    btn.onclick = async () => {
+        if (!deferredInstallPrompt) return showToast('Open browser menu → Add to Home Screen');
+        deferredInstallPrompt.prompt();
+        await deferredInstallPrompt.userChoice.catch(()=>{});
+        deferredInstallPrompt = null;
+        btn.remove();
+    };
+    document.querySelector('.phone-container')?.appendChild(btn);
+}
+function getProfileKey() { return 'whatsmeetProfile_' + (currentUser ? currentUser.username : 'guest'); }
+function loadLocalProfile() { try { return JSON.parse(localStorage.getItem(getProfileKey()) || '{}') || {}; } catch(e) { return {}; } }
+function saveLocalProfile(profile) { localStorage.setItem(getProfileKey(), JSON.stringify(profile)); applyLocalProfile(profile); }
+function applyLocalProfile(profile = loadLocalProfile()) {
+    const avatars = document.querySelectorAll('.chat-avatar');
+    avatars.forEach(a => {
+        if (profile.photo) { a.style.backgroundImage = `url(${profile.photo})`; a.style.backgroundSize = 'cover'; a.innerHTML = ''; }
+    });
+    const about = document.getElementById('cyberProfileAboutText');
+    if (about) about.textContent = profile.about || 'Hey there! I am using WhatsMeet';
+}
+function injectAdvancedProfileCard() {
+    const box = document.getElementById('cyberDashboardBox');
+    if (!box || document.getElementById('advancedProfileCard')) return;
+    const profile = loadLocalProfile();
+    const card = document.createElement('div');
+    card.id = 'advancedProfileCard';
+    card.className = 'advanced-profile-card';
+    card.innerHTML = `
+        <div class="profile-photo-preview" id="profilePhotoPreview">${profile.photo ? `<img src="${profile.photo}">` : '<i class="fas fa-user"></i>'}</div>
+        <div class="advanced-profile-info">
+            <b>Profile Photo & About</b>
+            <span id="cyberProfileAboutText">${profile.about || 'Hey there! I am using WhatsMeet'}</span>
+            <div class="advanced-profile-actions">
+                <button id="changeProfilePhotoBtn"><i class="fas fa-camera"></i> Photo</button>
+                <button id="changeAboutBtn"><i class="fas fa-pen"></i> About</button>
+                <button id="showQrBtn"><i class="fas fa-qrcode"></i> QR</button>
+            </div>
+            <input id="profilePhotoInput" type="file" accept="image/*" hidden>
+        </div>`;
+    box.appendChild(card);
+    const input = card.querySelector('#profilePhotoInput');
+    card.querySelector('#changeProfilePhotoBtn').onclick = () => input.click();
+    input.onchange = () => {
+        const file = input.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => { const p = loadLocalProfile(); p.photo = reader.result; saveLocalProfile(p); card.querySelector('#profilePhotoPreview').innerHTML = `<img src="${p.photo}">`; };
+        reader.readAsDataURL(file);
+    };
+    card.querySelector('#changeAboutBtn').onclick = () => { const p = loadLocalProfile(); const about = prompt('Set About:', p.about || 'Hey there! I am using WhatsMeet'); if (about !== null) { p.about = about.trim(); saveLocalProfile(p); } };
+    card.querySelector('#showQrBtn').onclick = showMyQrCode;
+}
+function showMyQrCode() {
+    if (!currentUser) return showToast('Login first');
+    const data = `${location.origin}${location.pathname}?add=${encodeURIComponent(currentUser.username)}`;
+    let modal = document.getElementById('qrModal'); if (modal) modal.remove();
+    modal = document.createElement('div'); modal.id = 'qrModal'; modal.className = 'pro-modal';
+    modal.innerHTML = `<div class="pro-modal-card"><button class="pro-modal-close"><i class="fas fa-times"></i></button><h3>Scan to add @${currentUser.username}</h3><img class="qr-img" src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(data)}"><p>${data}</p><button class="btn btn-whatsapp" id="copyQrLinkBtn">Copy Link</button></div>`;
+    modal.querySelector('.pro-modal-close').onclick = () => modal.remove();
+    modal.querySelector('#copyQrLinkBtn').onclick = () => navigator.clipboard.writeText(data).then(()=>showToast('QR link copied'));
+    document.body.appendChild(modal);
+}
+function checkAddFriendLink() {
+    const u = new URLSearchParams(location.search).get('add');
+    if (!u) return;
+    setTimeout(() => {
+        if (!currentUser) return switchAppTab('profile');
+        openSearchModal && openSearchModal();
+        const inp = document.getElementById('cyberSearchInput');
+        if (inp) { inp.value = u; handleCyberSearch(); }
+    }, 1200);
+}
+function updateCallState(text) {
+    const el = document.querySelector('.room-status-indicator');
+    if (el) el.textContent = '● ' + text;
+}
+function showScreenShareBanner() {
+    let b = document.getElementById('screenShareBanner');
+    if (!b) {
+        b = document.createElement('div'); b.id = 'screenShareBanner'; b.className = 'screen-share-banner';
+        b.innerHTML = '<i class="fas fa-desktop"></i><span>You are sharing your screen</span><button onclick="toggleScreenBtn.click()">Stop</button>';
+        roomPage.appendChild(b);
+    }
+    b.classList.add('show');
+}
+function hideScreenShareBanner() { document.getElementById('screenShareBanner')?.classList.remove('show'); }
+function getGroupsKey() { return 'whatsmeetGroups_' + (currentUser ? currentUser.username : 'guest'); }
+function loadGroups() { try { return JSON.parse(localStorage.getItem(getGroupsKey()) || '[]') || []; } catch(e) { return []; } }
+function saveGroups(groups) { localStorage.setItem(getGroupsKey(), JSON.stringify(groups)); }
+function injectAdvancedHub() {
+    if (document.getElementById('advancedHub')) return;
+    const target = document.getElementById('chatsLoggedInDashboard');
+    if (!target) return;
+    const hub = document.createElement('div');
+    hub.id = 'advancedHub';
+    hub.className = 'advanced-hub';
+    hub.innerHTML = `
+        <button onclick="createGroupChat()"><i class="fas fa-users"></i><span>Group</span></button>
+        <button onclick="openStatusCenter()"><i class="fas fa-circle-notch"></i><span>Status</span></button>
+        <button onclick="openMediaGallery()"><i class="fas fa-photo-video"></i><span>Media</span></button>
+        <button onclick="sendLiveLocation()"><i class="fas fa-location-dot"></i><span>Location</span></button>
+        <button onclick="showMyQrCode()"><i class="fas fa-qrcode"></i><span>QR</span></button>`;
+    target.prepend(hub);
+    renderGroupsInChatList();
+}
+function createGroupChat() {
+    if (!currentUser || !peer) return showToast('Login first');
+    const name = prompt('Group name:'); if (!name) return;
+    const members = prompt('Members usernames comma separated (without @):'); if (!members) return;
+    const group = { id: 'g_' + Date.now(), name: name.trim(), members: members.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean), createdAt: Date.now() };
+    const groups = loadGroups(); groups.unshift(group); saveGroups(groups); renderGroupsInChatList(); openGroupChat(group.id);
+}
+function renderGroupsInChatList() {
+    const list = document.getElementById('cyberFriendsChatsList'); if (!list) return;
+    document.querySelectorAll('.group-chat-row').forEach(x=>x.remove());
+    loadGroups().forEach(g => {
+        const row = document.createElement('div'); row.className = 'cyber-item group-chat-row';
+        row.innerHTML = `<div class="cyber-item-info"><div class="cyber-item-name"><span>👥 ${g.name}</span></div><div class="cyber-item-id">${g.members.length} members • local P2P group</div></div><div class="cyber-actions"><button class="btn btn-whatsapp-outline btn-small quick-call-btn" onclick="openGroupChat('${g.id}')"><i class="fas fa-comment"></i></button></div>`;
+        list.prepend(row);
+    });
+}
+function openGroupChat(groupId) {
+    const g = loadGroups().find(x => x.id === groupId); if (!g) return;
+    activeGroupChat = g; activeChatUsername = 'group:' + g.id; activeChatDisplayName = '👥 ' + g.name;
+    showPage(roomPage); roomIdDisplay.textContent = activeChatDisplayName; waitingScreen.style.display = 'none'; callScreen.classList.add('hidden'); chatPanel.classList.add('direct-chat-mode'); chatPanel.classList.remove('hidden'); updateChatHeader(`${g.members.length} members`);
+    chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Local P2P group chat. Members must be online.</div>';
+    groupConnections = {};
+    g.members.filter(u => u !== currentUser.username).forEach(u => {
+        try { const conn = peer.connect(u, { reliable: true }); groupConnections[u] = conn; conn.on('data', handleDataMessage); conn.on('open', () => showToast(`Connected @${u}`)); } catch(e) {}
+    });
+}
+window.createGroupChat = createGroupChat; window.openGroupChat = openGroupChat;
+function getStatusKey() { return 'whatsmeetStatuses_' + (currentUser ? currentUser.username : 'guest'); }
+function loadStatuses(){ try { return JSON.parse(localStorage.getItem(getStatusKey()) || '[]').filter(s => Date.now() - s.at < 24*60*60*1000); } catch(e){ return []; } }
+function saveStatuses(st){ localStorage.setItem(getStatusKey(), JSON.stringify(st)); }
+function openStatusCenter() {
+    let modal = document.getElementById('statusModal'); if (modal) modal.remove();
+    const statuses = loadStatuses();
+    modal = document.createElement('div'); modal.id='statusModal'; modal.className='pro-modal';
+    modal.innerHTML = `<div class="pro-modal-card status-card"><button class="pro-modal-close"><i class="fas fa-times"></i></button><h3>Status / Stories</h3><button class="btn btn-whatsapp" id="addTextStatusBtn">Add Text Status</button><div class="status-list">${statuses.length ? statuses.map(s=>`<div class="status-item"><b>${new Date(s.at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</b><p>${s.text}</p></div>`).join('') : '<p>No status yet</p>'}</div></div>`;
+    modal.querySelector('.pro-modal-close').onclick=()=>modal.remove();
+    modal.querySelector('#addTextStatusBtn').onclick=()=>{ const text=prompt('Write status:'); if(text){ const st=loadStatuses(); st.unshift({text, at:Date.now()}); saveStatuses(st); modal.remove(); openStatusCenter(); }};
+    document.body.appendChild(modal);
+}
+window.openStatusCenter = openStatusCenter;
+function collectMediaItem(url, type, name) { sessionMediaGallery.unshift({ url, type, name, at: Date.now(), chat: activeChatDisplayName }); sessionMediaGallery = sessionMediaGallery.slice(0, 100); window.sessionMediaGallery = sessionMediaGallery; }
+function openMediaGallery() {
+    window.sessionMediaGallery = sessionMediaGallery;
+    let modal=document.getElementById('mediaGalleryModal'); if(modal) modal.remove();
+    modal=document.createElement('div'); modal.id='mediaGalleryModal'; modal.className='pro-modal';
+    modal.innerHTML=`<div class="pro-modal-card media-gallery-card"><button class="pro-modal-close"><i class="fas fa-times"></i></button><h3>Media Gallery</h3><div class="media-gallery-grid">${sessionMediaGallery.length ? sessionMediaGallery.map((m,i)=>`<button onclick="openMediaPreview(sessionMediaGallery[${i}].url, sessionMediaGallery[${i}].type, sessionMediaGallery[${i}].name)">${m.type==='video'?`<video src="${m.url}"></video>`:`<img src="${m.url}">`}<span>${m.name}</span></button>`).join('') : '<p>No media in this session yet</p>'}</div></div>`;
+    modal.querySelector('.pro-modal-close').onclick=()=>modal.remove(); document.body.appendChild(modal);
+}
+window.openMediaGallery=openMediaGallery;
+function sendLiveLocation() {
+    if (!navigator.geolocation) return showToast('Location not supported');
+    showToast('Getting location...');
+    navigator.geolocation.getCurrentPosition(pos => {
+        const { latitude, longitude } = pos.coords;
+        const link = `📍 Live location: https://maps.google.com/?q=${latitude},${longitude}`;
+        if (chatInput) { chatInput.value = link; updateChatComposer(); sendTextMessage(); }
+        else showToast(link, 8000);
+    }, () => showToast('Location permission denied'), { enableHighAccuracy: true, timeout: 12000 });
+}
+window.sendLiveLocation=sendLiveLocation;
+function initAdvancedAppPack() {
+    registerPWAAndNotifications(); injectAdvancedProfileCard(); injectAdvancedHub(); applyLocalProfile(); checkAddFriendLink(); renderGroupsInChatList(); renderLocalCallHistory();
+}
+setTimeout(initAdvancedAppPack, 1000);
+
+// ============ Whiteboard Safety Fix ============
+let wbColor = '#00f0ff';
+function setWbColor(color) { wbColor = color || '#00f0ff'; }
+window.setWbColor = setWbColor;
+(function initWhiteboardSafe() {
+    const modal = document.getElementById('whiteboardModal');
+    const canvas = document.getElementById('whiteboardCanvas');
+    const closeBtn = document.getElementById('closeWhiteboardBtn');
+    const clearBtn = document.getElementById('clearWhiteboardBtn');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let drawing = false;
+    function pos(e) {
+        const r = canvas.getBoundingClientRect();
+        const t = e.touches ? e.touches[0] : e;
+        return { x: (t.clientX - r.left) * (canvas.width / r.width), y: (t.clientY - r.top) * (canvas.height / r.height) };
+    }
+    function start(e) { drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); e.preventDefault?.(); }
+    function move(e) { if (!drawing) return; const p = pos(e); ctx.strokeStyle = wbColor; ctx.lineWidth = wbColor === '#04040c' ? 18 : 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineTo(p.x, p.y); ctx.stroke(); e.preventDefault?.(); }
+    function end() { drawing = false; }
+    ['mousedown','touchstart'].forEach(ev => canvas.addEventListener(ev, start, { passive:false }));
+    ['mousemove','touchmove'].forEach(ev => canvas.addEventListener(ev, move, { passive:false }));
+    ['mouseup','mouseleave','touchend','touchcancel'].forEach(ev => canvas.addEventListener(ev, end));
+    if (closeBtn && modal) closeBtn.addEventListener('click', () => modal.classList.add('hidden'));
+    if (clearBtn) clearBtn.addEventListener('click', () => ctx.clearRect(0, 0, canvas.width, canvas.height));
+})();
