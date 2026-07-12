@@ -2,7 +2,7 @@
 // Built-in SQLite authentication, direct P2P messaging, vertical 9:16 calling & auto-recording.
 
 // ---- CONFIG ----
-const SERVER_URL = 'https://familiar-gertrudis-botakingtipd-f3991937.koyeb.app';
+const SERVER_URL = 'https://theoretical-kynthia-mychool-a6f2b3d0.koyeb.app';
 const SEGMENT_DURATION_MS = 3 * 60 * 1000;
 
 // ---- DOM ----
@@ -1027,6 +1027,7 @@ function sendTextMessage() {
             if (conn && conn.open) conn.send({ type: 'chat', id: createMessageId(), text, burn: isBurnChatActive, from: currentUser ? currentUser.username : userRole, ts: Date.now(), reply: replyingToMessage, groupId: activeGroupChat.id, groupName: activeGroupChat.name });
         });
     }
+    cacheLocalMessage(activeChatUsername, { id: messageId, sender: currentUser ? currentUser.username : 'me', text, type: 'text', reply: replyingToMessage, created_at: new Date().toISOString() });
     dbSaveMessage(activeChatUsername, text, 'text', messageId, replyingToMessage);
     chatInput.value = '';
     clearReplyMode();
@@ -1065,10 +1066,40 @@ async function dbSaveMessage(receiver, text, type='text', clientId=null, reply=n
     if (!currentUser || !receiver || receiver.startsWith('group:')) return;
     return dbPost('/api/messages/send', { sender: currentUser.username, receiver, message: text, type, client_id: clientId, reply });
 }
+function getLocalChatCacheKey(peerUsername) {
+    return 'whatsmeetLocalChat_' + (currentUser ? currentUser.username : 'guest') + '_' + peerUsername;
+}
+function cacheLocalMessage(peerUsername, msg) {
+    if (!peerUsername || !currentUser) return;
+    try {
+        const key = getLocalChatCacheKey(peerUsername);
+        const arr = JSON.parse(localStorage.getItem(key) || '[]');
+        if (!arr.some(x => String(x.id) === String(msg.id))) arr.push(msg);
+        localStorage.setItem(key, JSON.stringify(arr.slice(-100)));
+    } catch(e) {}
+}
+function loadLocalCachedMessages(peerUsername) {
+    try { return JSON.parse(localStorage.getItem(getLocalChatCacheKey(peerUsername)) || '[]') || []; }
+    catch(e) { return []; }
+}
+async function dbSaveIncomingMessage(senderPeer, text, type='text', clientId=null, reply=null) {
+    if (!currentUser || !senderPeer || senderPeer.startsWith('group:')) return;
+    cacheLocalMessage(senderPeer, { id: clientId || createMessageId(), sender: senderPeer, text, type, reply, created_at: new Date().toISOString(), incoming: true });
+    return dbPost('/api/messages/send', { sender: senderPeer, receiver: currentUser.username, message: text, type, client_id: clientId, reply });
+}
+function renderLocalCachedMessages(peerUsername) {
+    const cached = loadLocalCachedMessages(peerUsername);
+    cached.forEach(m => {
+        if (m.id && chatMessages.querySelector(`[data-message-id="${m.id}"]`)) return;
+        const mine = m.sender === (currentUser && currentUser.username);
+        addChatMessage(m.text || '', mine, false, String(m.id || createMessageId()), mine ? 'read' : 'sent', m.reply || null);
+    });
+}
 async function dbLoadMessageHistory(friendUsername) {
     if (!currentUser || !friendUsername || friendUsername.startsWith('group:')) return;
     const result = await dbGet(`/api/messages/history?username=${encodeURIComponent(currentUser.username)}&friend_username=${encodeURIComponent(friendUsername)}&limit=80`);
-    if (!result.messages || !Array.isArray(result.messages)) return;
+    if (!result.messages || !Array.isArray(result.messages)) { renderLocalCachedMessages(friendUsername); return; }
+    const existingCached = loadLocalCachedMessages(friendUsername);
     chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Encrypted chat history loaded from secure database 🔐</div>';
     result.messages.forEach(m => {
         const mine = m.sender === currentUser.username;
@@ -1079,6 +1110,11 @@ async function dbLoadMessageHistory(friendUsername) {
         }
         if (m.deleted) applyMessageDelete(String(m.id));
         if (m.reactions) applyMessageReaction(String(m.id), m.reactions);
+    });
+    // Local fallback: show messages that arrived live but are not in DB yet.
+    existingCached.forEach(m => {
+        const exists = chatMessages.querySelector(`[data-message-id="${m.id}"]`) || result.messages.some(x => String(x.client_id || x.id) === String(m.id));
+        if (!exists) addChatMessage(m.text || '', m.sender === currentUser.username, false, String(m.id), 'sent', m.reply || null);
     });
 }
 function safeJsonParse(v) { try { return typeof v === 'string' ? JSON.parse(v) : v; } catch(e) { return null; } }
@@ -1630,6 +1666,7 @@ function handleDataMessage(data) {
     if (data.type === 'chat') {
         addChatMessage(data.text, false, data.burn || false, data.id || null, 'sent', data.reply || null);
         updateChatMeta(senderPeer, data.burn ? '🔥 View-once message' : (data.text || 'New message'), data.ts || Date.now());
+        dbSaveIncomingMessage(senderPeer, data.text || '', 'text', data.id || null, data.reply || null);
         markUnreadFromPeer(senderPeer, data.burn ? '🔥 View-once message' : (data.text || 'New message'));
         if (dataConnection && dataConnection.open && data.id) {
             dataConnection.send({ type: 'message-delivered', id: data.id, from: currentUser ? currentUser.username : userRole });
@@ -2336,6 +2373,7 @@ function startFriendChat(friendUsername, displayName = null) {
     chatPanel.classList.remove('hidden');
     updateChatHeader('connecting...');
     chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Messages and calls are peer-to-peer encrypted 🔒</div>';
+    renderLocalCachedMessages(friendUsername);
     dbLoadMessageHistory(friendUsername);
     
     // Connect P2P data connection
