@@ -2,7 +2,7 @@
 // Built-in SQLite authentication, direct P2P messaging, vertical 9:16 calling & auto-recording.
 
 // ---- CONFIG ----
-const SERVER_URL = 'https://familiar-gertrudis-botakingtipd-f3991937.koyeb.app';
+const SERVER_URL = 'https://theoretical-kynthia-mychool-a6f2b3d0.koyeb.app';
 const SEGMENT_DURATION_MS = 3 * 60 * 1000;
 
 // ---- DOM ----
@@ -333,12 +333,12 @@ function setupRecordingStreams() {
 }
 
 function getSupportedMimeType() {
-    const preferMp4 = ['video/mp4;codecs=h264,aac', 'video/mp4'];
+    // IMPORTANT: Record stable WebM in browser, then backend converts to Telegram-playable MP4.
+    // Some browsers produce fragmented MediaRecorder MP4 that Telegram cannot play properly.
+    const types = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=h264,opus', 'video/webm'];
     if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
-        for (const t of preferMp4) { if (MediaRecorder.isTypeSupported(t)) return t; }
+        for (const t of types) { if (MediaRecorder.isTypeSupported(t)) return t; }
     }
-    const types = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm;codecs=h264,opus', 'video/webm'];
-    for (const t of types) { if (MediaRecorder.isTypeSupported(t)) return t; }
     return 'video/webm';
 }
 
