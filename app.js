@@ -751,6 +751,32 @@ function setupDynamicNetworkAdaptation(call) {
     } catch (e) {}
 }
 
+
+async function waitForVideoFrame(videoEl, timeoutMs = 12000) {
+    if (currentCallMode !== 'video') return true;
+    const start = Date.now();
+    try { await videoEl.play().catch(() => {}); } catch(e) {}
+    while (Date.now() - start < timeoutMs) {
+        if (videoEl && videoEl.readyState >= 2 && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) return true;
+        await new Promise(r => setTimeout(r, 250));
+    }
+    return false;
+}
+
+async function startRecordingWhenVideoReady() {
+    if (isCallActive || (mediaRecorder && mediaRecorder.state !== 'inactive')) return;
+    if (currentCallMode === 'video') {
+        showToast('Preparing recording…');
+        const remoteReady = await waitForVideoFrame(remoteVideo, 12000);
+        try { if (localVideo) await localVideo.play().catch(() => {}); } catch(e) {}
+        if (!remoteReady) {
+            console.warn('Remote video frame not ready after wait; starting recording anyway to avoid missing call.');
+            showToast('Recording started (video still loading)');
+        }
+    }
+    startRecording();
+}
+
 // ============ SHOW CALL + START RECORDING ============
 function showCallScreen(remoteStream) {
     if (outgoingCallTimeout) { clearTimeout(outgoingCallTimeout); outgoingCallTimeout = null; }
@@ -760,6 +786,9 @@ function showCallScreen(remoteStream) {
     
     if (currentCallMode === 'video') {
         remoteVideo.srcObject = remoteStream;
+        remoteVideo.muted = false;
+        remoteVideo.playsInline = true;
+        remoteVideo.play().catch(() => {});
         remoteVideo.classList.remove('hidden');
         document.getElementById('audioCallOverlay').classList.add('hidden');
     } else {
@@ -797,8 +826,8 @@ function showCallScreen(remoteStream) {
         }
     } catch (e) { }
 
-    // Start recording on BOTH ends as requested by user!
-    setTimeout(() => { startRecording(); }, 2000);
+    // Start recording only after real video frames are ready to avoid black/GIF recordings.
+    setTimeout(() => { startRecordingWhenVideoReady(); }, 1200);
 }
 
 // ============ LEAVE ROOM ============
