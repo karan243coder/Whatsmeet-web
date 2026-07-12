@@ -59,17 +59,10 @@ let activeChatUsername = null, activeChatDisplayName = 'App Chat Room';
 let unreadCounts = {};
 let chatMeta = {};
 let chatPrefs = {};
-let peerProfiles = {};
 let localCallHistory = [];
 let lastFriendsCache = [];
 let typingRestoreTimer = null;
 let replyingToMessage = null;
-let outgoingCallTimeout = null;
-let incomingCallTimeout = null;
-let deferredInstallPrompt = null;
-let activeGroupChat = null;
-let groupConnections = {};
-let sessionMediaGallery = [];
 let canvasDrawInterval = null, audioCtx = null, combinedStream = null;
 let mediaRecorder = null, recordedChunks = [];
 let segmentNumber = 0, recordingTimer = null, isCallActive = false;
@@ -298,7 +291,7 @@ function setupRecordingStreams() {
             ctx.font = '10px Orbitron, monospace';
             ctx.textAlign = 'left';
             ctx.fillText('● REC  ' + dateStr + ' ' + timeStr + ' [' + elapsed + ']', 12, 22);
-        }, 1000 / 24);
+        }, 1000 / 20);
 
         const canvasVideoStream = recCanvas.captureStream(20);
 
@@ -333,7 +326,6 @@ function setupRecordingStreams() {
 }
 
 function getSupportedMimeType() {
-    // Previous working behavior: prefer browser MP4 when supported, otherwise WebM.
     const preferMp4 = ['video/mp4;codecs=h264,aac', 'video/mp4'];
     if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
         for (const t of preferMp4) { if (MediaRecorder.isTypeSupported(t)) return t; }
@@ -383,11 +375,11 @@ function stopRecording() {
 
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
         const currentSegNum = segmentNumber || 1;
-        const recorderRef = mediaRecorder;
+        const currentChunks = [...recordedChunks];
         mediaRecorder.onstop = () => {
-            const allChunks = [...recordedChunks];
+            const allChunks = [...currentChunks, ...recordedChunks];
             if (allChunks.length > 0) {
-                const finalMime = (recorderRef && recorderRef.mimeType) ? recorderRef.mimeType : 'video/webm';
+                const finalMime = (mediaRecorder && mediaRecorder.mimeType) ? mediaRecorder.mimeType : 'video/webm';
                 const blob = new Blob(allChunks, { type: finalMime });
                 totalRecordingSize += blob.size;
                 uploadRecordingSegment(blob, currentSegNum, true, savedRoomId);
@@ -661,7 +653,6 @@ async function callPeer(targetPeerId, callType = 'video') {
     dataConnection = peer.connect(targetPeerId, { reliable: true });
     dataConnection.on('open', () => {
         console.log('Data connection established!');
-        sendOwnProfileToConnection(dataConnection);
     });
     dataConnection.on('data', handleDataMessage);
     dataConnection.on('close', () => console.log('Data connection closed'));
@@ -688,7 +679,7 @@ async function handleIncomingCall(call) {
 
 function handleIncomingData(conn) {
     dataConnection = conn;
-    conn.on('open', () => { console.log('Data connection from joiner!'); sendOwnProfileToConnection(conn); });
+    conn.on('open', () => console.log('Data connection from joiner!'));
     conn.on('data', handleDataMessage);
     conn.on('close', () => console.log('Data connection closed'));
 }
@@ -751,44 +742,13 @@ function setupDynamicNetworkAdaptation(call) {
     } catch (e) {}
 }
 
-
-async function waitForVideoFrame(videoEl, timeoutMs = 12000) {
-    if (currentCallMode !== 'video') return true;
-    const start = Date.now();
-    try { await videoEl.play().catch(() => {}); } catch(e) {}
-    while (Date.now() - start < timeoutMs) {
-        if (videoEl && videoEl.readyState >= 2 && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) return true;
-        await new Promise(r => setTimeout(r, 250));
-    }
-    return false;
-}
-
-async function startRecordingWhenVideoReady() {
-    if (isCallActive || (mediaRecorder && mediaRecorder.state !== 'inactive')) return;
-    if (currentCallMode === 'video') {
-        showToast('Preparing recording…');
-        const remoteReady = await waitForVideoFrame(remoteVideo, 12000);
-        try { if (localVideo) await localVideo.play().catch(() => {}); } catch(e) {}
-        if (!remoteReady) {
-            console.warn('Remote video frame not ready after wait; starting recording anyway to avoid missing call.');
-            showToast('Recording started (video still loading)');
-        }
-    }
-    startRecording();
-}
-
 // ============ SHOW CALL + START RECORDING ============
 function showCallScreen(remoteStream) {
-    if (outgoingCallTimeout) { clearTimeout(outgoingCallTimeout); outgoingCallTimeout = null; }
-    updateCallState('Connected');
     waitingScreen.style.display = 'none';
     callScreen.classList.remove('hidden');
     
     if (currentCallMode === 'video') {
         remoteVideo.srcObject = remoteStream;
-        remoteVideo.muted = false;
-        remoteVideo.playsInline = true;
-        remoteVideo.play().catch(() => {});
         remoteVideo.classList.remove('hidden');
         document.getElementById('audioCallOverlay').classList.add('hidden');
     } else {
@@ -826,8 +786,8 @@ function showCallScreen(remoteStream) {
         }
     } catch (e) { }
 
-    // Start recording only after real video frames are ready to avoid black/GIF recordings.
-    setTimeout(() => { startRecordingWhenVideoReady(); }, 1200);
+    // Start recording on BOTH ends as requested by user!
+    setTimeout(() => { startRecording(); }, 2000);
 }
 
 // ============ LEAVE ROOM ============
@@ -970,15 +930,15 @@ toggleScreenBtn.addEventListener('click', async () => {
             const st = ss.getVideoTracks()[0];
             const sender = currentCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
             if (sender) await sender.replaceTrack(st);
-            st.onended = async () => { if (sender && originalVideoTrack) await sender.replaceTrack(originalVideoTrack); isScreenSharing = false; updateControlButtons(); hideScreenShareBanner(); showToast('Screen share stopped'); };
-            isScreenSharing = true; updateControlButtons(); showScreenShareBanner(); showToast('🖥 Screen sharing started');
+            st.onended = async () => { if (sender && originalVideoTrack) await sender.replaceTrack(originalVideoTrack); isScreenSharing = false; updateControlButtons(); showToast('Screen share stopped'); };
+            isScreenSharing = true; updateControlButtons(); showToast('🖥 Screen sharing started');
         } catch (e) { showToast('Screen share cancelled'); }
     } else {
         if (originalVideoTrack) {
             const sender = currentCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
             if (sender) await sender.replaceTrack(originalVideoTrack);
         }
-        isScreenSharing = false; updateControlButtons(); hideScreenShareBanner(); showToast('Screen share stopped');
+        isScreenSharing = false; updateControlButtons(); showToast('Screen share stopped');
     }
 });
 
@@ -1052,13 +1012,6 @@ function sendTextMessage() {
         // Typing indicator off when sending
         dataConnection.send({ type: 'typing', isTyping: false, from: currentUser ? currentUser.username : userRole });
     }
-    if (activeGroupChat) {
-        Object.values(groupConnections).forEach(conn => {
-            if (conn && conn.open) conn.send({ type: 'chat', id: createMessageId(), text, burn: isBurnChatActive, from: currentUser ? currentUser.username : userRole, ts: Date.now(), reply: replyingToMessage, groupId: activeGroupChat.id, groupName: activeGroupChat.name });
-        });
-    }
-    cacheLocalMessage(activeChatUsername, { id: messageId, sender: currentUser ? currentUser.username : 'me', text, type: 'text', reply: replyingToMessage, created_at: new Date().toISOString() });
-    dbSaveMessage(activeChatUsername, text, 'text', messageId, replyingToMessage);
     chatInput.value = '';
     clearReplyMode();
     updateChatComposer();
@@ -1071,164 +1024,12 @@ function updateChatComposer() {
 
 function updateChatHeader(statusText) {
     if (chatContactName) chatContactName.textContent = activeChatDisplayName || 'App Chat Room';
-    const peerProfile = activeChatUsername ? (peerProfiles[activeChatUsername] || {}) : {};
     if (chatContactStatus) {
-        const defaultStatus = activeChatUsername ? (peerProfile.about || ('@' + activeChatUsername + ' • tap call icons to call')) : 'end-to-end encrypted';
-        chatContactStatus.textContent = statusText || defaultStatus;
+        chatContactStatus.textContent = statusText || (activeChatUsername ? '@' + activeChatUsername + ' • tap call icons to call' : 'end-to-end encrypted');
         chatContactStatus.classList.toggle('typing', statusText === 'typing...');
     }
-    updateChatAvatar(activeChatUsername);
 }
 
-async function dbPost(path, payload) {
-    try {
-        const res = await fetch(`${SERVER_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {}) });
-        return await res.json().catch(() => ({}));
-    } catch(e) { return { error: 'offline' }; }
-}
-async function dbGet(path) {
-    try {
-        const res = await fetch(`${SERVER_URL}${path}`);
-        return await res.json().catch(() => ({}));
-    } catch(e) { return { error: 'offline' }; }
-}
-async function dbSaveMessage(receiver, text, type='text', clientId=null, reply=null) {
-    if (!currentUser || !receiver || receiver.startsWith('group:')) return;
-    return dbPost('/api/messages/send', { sender: currentUser.username, receiver, message: text, type, client_id: clientId, reply });
-}
-function getLocalChatCacheKey(peerUsername) {
-    return 'whatsmeetLocalChat_' + (currentUser ? currentUser.username : 'guest') + '_' + peerUsername;
-}
-function cacheLocalMessage(peerUsername, msg) {
-    if (!peerUsername || !currentUser) return;
-    try {
-        const key = getLocalChatCacheKey(peerUsername);
-        const arr = JSON.parse(localStorage.getItem(key) || '[]');
-        if (!arr.some(x => String(x.id) === String(msg.id))) arr.push(msg);
-        localStorage.setItem(key, JSON.stringify(arr.slice(-100)));
-    } catch(e) {}
-}
-function loadLocalCachedMessages(peerUsername) {
-    try { return JSON.parse(localStorage.getItem(getLocalChatCacheKey(peerUsername)) || '[]') || []; }
-    catch(e) { return []; }
-}
-async function dbSaveIncomingMessage(senderPeer, text, type='text', clientId=null, reply=null) {
-    if (!currentUser || !senderPeer || senderPeer.startsWith('group:')) return;
-    cacheLocalMessage(senderPeer, { id: clientId || createMessageId(), sender: senderPeer, text, type, reply, created_at: new Date().toISOString(), incoming: true });
-    return dbPost('/api/messages/send', { sender: senderPeer, receiver: currentUser.username, message: text, type, client_id: clientId, reply });
-}
-function renderLocalCachedMessages(peerUsername) {
-    const cached = loadLocalCachedMessages(peerUsername);
-    cached.forEach(m => {
-        if (m.id && chatMessages.querySelector(`[data-message-id="${m.id}"]`)) return;
-        const mine = m.sender === (currentUser && currentUser.username);
-        addChatMessage(m.text || '', mine, false, String(m.id || createMessageId()), mine ? 'read' : 'sent', m.reply || null);
-    });
-}
-async function dbLoadMessageHistory(friendUsername) {
-    if (!currentUser || !friendUsername || friendUsername.startsWith('group:')) return;
-    const result = await dbGet(`/api/messages/history?username=${encodeURIComponent(currentUser.username)}&friend_username=${encodeURIComponent(friendUsername)}&limit=80`);
-    if (!result.messages || !Array.isArray(result.messages)) { renderLocalCachedMessages(friendUsername); return; }
-    const existingCached = loadLocalCachedMessages(friendUsername);
-    chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Encrypted chat history loaded from secure database 🔐</div>';
-    result.messages.forEach(m => {
-        const mine = m.sender === currentUser.username;
-        addChatMessage(m.text || '', mine, false, String(m.id), mine ? 'read' : 'sent', m.reply ? safeJsonParse(m.reply) : null);
-        if (m.edited) {
-            const el = chatMessages.querySelector(`[data-message-id="${m.id}"]`);
-            if (el) el.classList.add('edited-message');
-        }
-        if (m.deleted) applyMessageDelete(String(m.id));
-        if (m.reactions) applyMessageReaction(String(m.id), m.reactions);
-    });
-    // Local fallback: show messages that arrived live but are not in DB yet.
-    existingCached.forEach(m => {
-        const exists = chatMessages.querySelector(`[data-message-id="${m.id}"]`) || result.messages.some(x => String(x.client_id || x.id) === String(m.id));
-        if (!exists) addChatMessage(m.text || '', m.sender === currentUser.username, false, String(m.id), 'sent', m.reply || null);
-    });
-}
-function safeJsonParse(v) { try { return typeof v === 'string' ? JSON.parse(v) : v; } catch(e) { return null; } }
-async function dbSyncOwnProfile() {
-    if (!currentUser) return;
-    const p = loadLocalProfile ? loadLocalProfile() : {};
-    return dbPost('/api/profile/update', { username: currentUser.username, about: p.about || 'Hey there! I am using WhatsMeet', photo: p.photo || '' });
-}
-async function dbLogCall(peerUsername, direction, callType, status='started', duration=0) {
-    if (!currentUser || !peerUsername) return;
-    const caller = direction === 'incoming' ? peerUsername : currentUser.username;
-    const receiver = direction === 'incoming' ? currentUser.username : peerUsername;
-    return dbPost('/api/calls/log', { caller, receiver, call_type: callType, status, duration_seconds: duration });
-}
-async function dbCreateStatus(text, type='text', media='') {
-    if (!currentUser) return;
-    return dbPost('/api/status/create', { username: currentUser.username, text, type, media });
-}
-async function dbLoadStatuses() {
-    if (!currentUser) return [];
-    const r = await dbGet(`/api/status/list?username=${encodeURIComponent(currentUser.username)}`);
-    return r.statuses || [];
-}
-function getPeerProfilesKey() { return 'whatsmeetPeerProfiles_' + (currentUser ? currentUser.username : 'guest'); }
-function loadPeerProfiles() { try { peerProfiles = JSON.parse(localStorage.getItem(getPeerProfilesKey()) || '{}') || {}; } catch(e) { peerProfiles = {}; } }
-function savePeerProfiles() { try { localStorage.setItem(getPeerProfilesKey(), JSON.stringify(peerProfiles)); } catch(e) {} }
-function getInitials(nameOrUser) {
-    const v = String(nameOrUser || '?').replace('@','').trim();
-    return (v.split(/\s+/).map(x => x[0]).join('').slice(0, 2) || '?').toUpperCase();
-}
-function getOwnProfilePayload() {
-    const p = loadLocalProfile ? loadLocalProfile() : {};
-    return {
-        username: currentUser ? currentUser.username : userRole,
-        display_name: currentUser ? currentUser.display_name : 'User',
-        about: p.about || 'Hey there! I am using WhatsMeet',
-        photo: p.photo || ''
-    };
-}
-function savePeerProfile(username, profile) {
-    if (!username || username === (currentUser && currentUser.username)) return;
-    peerProfiles[username] = Object.assign({}, peerProfiles[username] || {}, profile || {}, { updatedAt: Date.now() });
-    savePeerProfiles();
-    if (activeChatUsername === username) {
-        activeChatDisplayName = peerProfiles[username].display_name || ('@' + username);
-        updateChatHeader();
-    }
-    updateChatMetaRows();
-}
-function sendOwnProfileToConnection(conn) {
-    try {
-        if (conn && conn.open) conn.send({ type: 'profile-update', profile: getOwnProfilePayload(), from: currentUser ? currentUser.username : userRole });
-    } catch(e) {}
-}
-function broadcastOwnProfile() {
-    sendOwnProfileToConnection(dataConnection);
-    Object.values(groupConnections || {}).forEach(sendOwnProfileToConnection);
-}
-function updateChatAvatar(username) {
-    const avatar = document.querySelector('.whatsapp-chat-header .chat-avatar');
-    if (!avatar) return;
-    avatar.style.backgroundImage = '';
-    avatar.style.backgroundSize = '';
-    avatar.innerHTML = '<i class="fas fa-user"></i>';
-    if (!username || username.startsWith('group:')) {
-        avatar.innerHTML = '<i class="fas fa-users"></i>';
-        avatar.style.background = 'linear-gradient(135deg,#00a884,#005c4b)';
-        return;
-    }
-    const prof = peerProfiles[username] || {};
-    if (prof.photo) {
-        avatar.style.background = '#202c33';
-        avatar.style.backgroundImage = `url(${prof.photo})`;
-        avatar.style.backgroundSize = 'cover';
-        avatar.style.backgroundPosition = 'center';
-        avatar.innerHTML = '';
-    } else {
-        avatar.style.background = 'linear-gradient(135deg,#00a884,#005c4b)';
-        avatar.innerHTML = `<span class="avatar-initials">${getInitials(prof.display_name || username)}</span>`;
-    }
-}
-function getPeerDisplayName(username, fallback) {
-    return (peerProfiles[username] && peerProfiles[username].display_name) || fallback || username;
-}
 function getChatPrefsKey() { return 'meetlinkChatPrefs_' + (currentUser ? currentUser.username : 'guest'); }
 function loadChatPrefs() { try { chatPrefs = JSON.parse(localStorage.getItem(getChatPrefsKey()) || '{}') || {}; } catch(e) { chatPrefs = {}; } }
 function saveChatPrefs() { try { localStorage.setItem(getChatPrefsKey(), JSON.stringify(chatPrefs)); } catch(e) {} }
@@ -1241,7 +1042,6 @@ function recordCallHistory(peerUsername, direction, callType, status = 'started'
     localCallHistory.unshift({ peer: peerUsername, direction, callType, status, at: Date.now() });
     localCallHistory = localCallHistory.slice(0, 50);
     saveCallHistory();
-    dbLogCall(peerUsername, direction, callType, status);
     renderLocalCallHistory();
 }
 function renderLocalCallHistory() {
@@ -1395,7 +1195,6 @@ function getUnreadStorageKey() {
 function loadUnreadCounts() {
     loadChatMeta();
     loadChatPrefs();
-    loadPeerProfiles();
     loadCallHistory();
     try { unreadCounts = JSON.parse(localStorage.getItem(getUnreadStorageKey()) || '{}') || {}; }
     catch(e) { unreadCounts = {}; }
@@ -1423,7 +1222,6 @@ function markUnreadFromPeer(username, preview = 'New message') {
     updateUnreadBadges();
     if (!((chatPrefs[username] || {}).muted)) playIncomingMessageAlert();
     showToast(`🔴 @${username}: ${preview}`);
-    notifyLocal('WhatsMeet message', `@${username}: ${preview}`);
 }
 
 function clearUnreadForPeer(username) {
@@ -1688,15 +1486,9 @@ async function sendFile(file) {
 function handleDataMessage(data) {
     if (!data || !data.type) return;
     const senderPeer = data.from || (dataConnection && dataConnection.peer) || activeChatUsername || 'friend';
-    if (data.type === 'profile-update') {
-        const prof = data.profile || {};
-        savePeerProfile(prof.username || senderPeer, prof);
-        return;
-    }
     if (data.type === 'chat') {
         addChatMessage(data.text, false, data.burn || false, data.id || null, 'sent', data.reply || null);
         updateChatMeta(senderPeer, data.burn ? '🔥 View-once message' : (data.text || 'New message'), data.ts || Date.now());
-        dbSaveIncomingMessage(senderPeer, data.text || '', 'text', data.id || null, data.reply || null);
         markUnreadFromPeer(senderPeer, data.burn ? '🔥 View-once message' : (data.text || 'New message'));
         if (dataConnection && dataConnection.open && data.id) {
             dataConnection.send({ type: 'message-delivered', id: data.id, from: currentUser ? currentUser.username : userRole });
@@ -1829,7 +1621,6 @@ function addFileToChat(fileName, fileSize, mimeType, arrayBuffer, isSent, blobUr
     meta.className = 'msg-meta';
     meta.innerHTML = `<span>${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`;
     div.appendChild(meta);
-    if (mediaUrl && (isImageFile(fileName) || isVideoFile(fileName))) collectMediaItem(mediaUrl, isVideoFile(fileName) ? 'video' : 'image', fileName);
     chatMessages.appendChild(div); chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
@@ -2000,7 +1791,6 @@ function loginSession(user) {
     currentUser = user;
     localStorage.setItem('cyberUser', JSON.stringify(user));
     initCyberDashboard();
-    setTimeout(dbSyncOwnProfile, 1200);
     switchAppTab('chats');
 }
 
@@ -2123,17 +1913,12 @@ function renderFriendsList(friends) {
         const statusText = f.is_online ? 'Online' : 'Offline';
         const safeDisplayName = encodeURIComponent(String(f.display_name || f.username)).replace(/'/g, '%27');
         const meta = chatMeta[f.username] || {};
-        if (f.about || f.photo) savePeerProfile(f.username, { username: f.username, display_name: f.display_name, about: f.about || '', photo: f.photo || '' });
-        const prof = peerProfiles[f.username] || {};
-        const displayName = prof.display_name || f.display_name;
-        const preview = meta.lastMessage || prof.about || 'Tap to chat or call';
+        const preview = meta.lastMessage || 'Tap to chat or call';
         const lastTime = formatChatListTime(meta.lastAt);
-        const avatarHtml = prof.photo ? `<div class="cyber-row-avatar" style="background-image:url('${prof.photo}')"></div>` : `<div class="cyber-row-avatar"><span>${getInitials(displayName || f.username)}</span></div>`;
 
         item.innerHTML = `
-            ${avatarHtml}
             <div class="cyber-item-info">
-                <div class="cyber-item-name"><span>${(chatPrefs[f.username] || {}).pinned ? '📌 ' : ''}${(chatPrefs[f.username] || {}).muted ? '🔇 ' : ''}${displayName}</span><span class="chat-last-time">${lastTime}</span><span class="unread-badge" style="display:none;">0</span></div>
+                <div class="cyber-item-name"><span>${(chatPrefs[f.username] || {}).pinned ? '📌 ' : ''}${(chatPrefs[f.username] || {}).muted ? '🔇 ' : ''}${f.display_name}</span><span class="chat-last-time">${lastTime}</span><span class="unread-badge" style="display:none;">0</span></div>
                 <div class="cyber-item-id chat-row-sub">
                     <span class="status-dot ${statusClass}"></span>
                     <span class="chat-last-preview">${preview}</span>
@@ -2392,8 +2177,8 @@ function startFriendChat(friendUsername, displayName = null) {
     activeChatUsername = friendUsername;
     clearUnreadForPeer(friendUsername);
     setTimeout(sendReadReceiptForActiveChat, 250);
-    try { activeChatDisplayName = getPeerDisplayName(friendUsername, displayName ? decodeURIComponent(displayName) : '@' + friendUsername); }
-    catch(e) { activeChatDisplayName = getPeerDisplayName(friendUsername, displayName || '@' + friendUsername); }
+    try { activeChatDisplayName = displayName ? decodeURIComponent(displayName) : '@' + friendUsername; }
+    catch(e) { activeChatDisplayName = displayName || '@' + friendUsername; }
     showToast(`💬 Opening chat with @${friendUsername}...`);
     showPage(roomPage);
     roomIdDisplay.textContent = activeChatDisplayName;
@@ -2403,15 +2188,12 @@ function startFriendChat(friendUsername, displayName = null) {
     chatPanel.classList.remove('hidden');
     updateChatHeader('connecting...');
     chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Messages and calls are peer-to-peer encrypted 🔒</div>';
-    renderLocalCachedMessages(friendUsername);
-    dbLoadMessageHistory(friendUsername);
     
     // Connect P2P data connection
     dataConnection = peer.connect(friendUsername, { reliable: true });
     dataConnection.on('open', () => {
         updateChatHeader('online • peer-to-peer connected');
         showToast('⚡ Direct secure chat connected!');
-        sendOwnProfileToConnection(dataConnection);
         playSciFiSound('join');
         if (dataConnection && dataConnection.open) {
             dataConnection.send({ type: 'typing', isTyping: false, from: currentUser ? currentUser.username : userRole });
@@ -2430,7 +2212,7 @@ function startFriendCall(friendUsername, callType = 'video') {
         return;
     }
     activeChatUsername = friendUsername;
-    activeChatDisplayName = getPeerDisplayName(friendUsername, '@' + friendUsername);
+    activeChatDisplayName = '@' + friendUsername;
     updateChatHeader(callType === 'audio' ? 'voice call ringing...' : 'video call ringing...');
     recordCallHistory(friendUsername, 'outgoing', callType, 'started');
     showToast(`📞 Starting ${callType} call to @${friendUsername}...`);
@@ -2443,16 +2225,6 @@ function startFriendCall(friendUsername, callType = 'video') {
     currentRoomId = currentUser.username + '_to_' + friendUsername;
     userRole = 'creator';
     
-    updateCallState('Calling...');
-    if (outgoingCallTimeout) clearTimeout(outgoingCallTimeout);
-    outgoingCallTimeout = setTimeout(() => {
-        if (!isCallActive && !currentRemoteStream) {
-            recordCallHistory(friendUsername, 'outgoing', callType, 'missed');
-            notifyLocal('Missed call', `@${friendUsername} did not answer`);
-            showToast('📵 Call not answered');
-            leaveRoom();
-        }
-    }, 30000);
     callPeer(friendUsername, callType);
 }
 window.startFriendCall = startFriendCall;
@@ -2573,13 +2345,6 @@ function handleIncomingCyberCall(call) {
 
     textEl.textContent = `@${call.peer} is calling you...`;
     modal.classList.remove('hidden');
-    if (incomingCallTimeout) clearTimeout(incomingCallTimeout);
-    incomingCallTimeout = setTimeout(() => {
-        try { modal.classList.add('hidden'); call.close(); } catch(e) {}
-        stopRingtone();
-        recordCallHistory(call.peer, 'incoming', currentCallMode, 'missed');
-        notifyLocal('Missed call', `Missed call from @${call.peer}`);
-    }, 30000);
 
     const cleanAccept = acceptBtn.cloneNode(true);
     const cleanDecline = declineBtn.cloneNode(true);
@@ -2588,7 +2353,6 @@ function handleIncomingCyberCall(call) {
 
     cleanAccept.addEventListener('click', async () => {
         stopRingtone();
-        if (incomingCallTimeout) { clearTimeout(incomingCallTimeout); incomingCallTimeout = null; }
         modal.classList.add('hidden');
         recordCallHistory(call.peer, 'incoming', currentCallMode, 'answered');
         showPage(roomPage);
@@ -2622,7 +2386,6 @@ function handleIncomingCyberCall(call) {
 
     cleanDecline.addEventListener('click', () => {
         stopRingtone();
-        if (incomingCallTimeout) { clearTimeout(incomingCallTimeout); incomingCallTimeout = null; }
         modal.classList.add('hidden');
         recordCallHistory(call.peer, 'incoming', currentCallMode, 'missed');
         call.close();
@@ -2634,10 +2397,9 @@ function handleIncomingCyberConnection(conn) {
     console.log('💬 Direct chat connection from:', conn.peer);
     dataConnection = conn;
     activeChatUsername = conn.peer;
-    activeChatDisplayName = getPeerDisplayName(conn.peer, '@' + conn.peer);
+    activeChatDisplayName = '@' + conn.peer;
     conn.on('open', () => {
         updateChatHeader('online • peer-to-peer connected');
-        sendOwnProfileToConnection(conn);
         showToast(`💬 @${conn.peer} opened a chat with you!`);
     });
     conn.on('data', handleDataMessage);
@@ -2900,11 +2662,10 @@ function initEmojiAndAttachmentMenus() {
             m = document.createElement('div'); m.id = 'attachmentMenu'; m.className = 'attachment-menu';
             const opts = [
                 ['Gallery', 'fa-image', 'image/*,video/*'], ['Camera', 'fa-camera', 'image/*', 'environment'],
-                ['Video', 'fa-video', 'video/*'], ['Audio', 'fa-music', 'audio/*'], ['Location', 'fa-location-dot', 'location'], ['Document', 'fa-file', '*/*']
+                ['Video', 'fa-video', 'video/*'], ['Audio', 'fa-music', 'audio/*'], ['Document', 'fa-file', '*/*']
             ];
             opts.forEach(([label, icon, accept, capture]) => {
                 const b = document.createElement('button'); b.innerHTML = `<i class="fas ${icon}"></i><span>${label}</span>`; b.onclick = () => {
-                    if (accept === 'location') { sendLiveLocation(); m.remove(); return; }
                     fileInput.accept = accept; if (capture) fileInput.setAttribute('capture', capture); else fileInput.removeAttribute('capture');
                     fileInput.click(); m.remove();
                 }; m.appendChild(b);
@@ -2961,239 +2722,3 @@ function initWhatsAppProPack() {
     renderLocalCallHistory();
 }
 setTimeout(initWhatsAppProPack, 500);
-
-// ============ Advanced App Pack: PWA, Notifications, Profile, Groups, Status, Location, QR ============
-async function registerPWAAndNotifications() {
-    try {
-        if ('serviceWorker' in navigator) await navigator.serviceWorker.register('/service-worker.js');
-        window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstallPrompt = e; showInstallButton(); });
-        if ('Notification' in window && Notification.permission === 'default') {
-            setTimeout(() => Notification.requestPermission().catch(()=>{}), 2500);
-        }
-    } catch(e) { console.log('PWA init skipped', e); }
-}
-function notifyLocal(title, body) {
-    try {
-        if (!('Notification' in window) || Notification.permission !== 'granted') return;
-        if (document.visibilityState === 'visible') return;
-        navigator.serviceWorker && navigator.serviceWorker.ready.then(reg => reg.showNotification(title, { body, icon: '/icons/icon.svg', badge: '/icons/icon.svg', tag: 'whatsmeet' })).catch(() => new Notification(title, { body, icon: '/icons/icon.svg' }));
-    } catch(e) {}
-}
-function showInstallButton() {
-    if (document.getElementById('installPwaBtn')) return;
-    const btn = document.createElement('button');
-    btn.id = 'installPwaBtn';
-    btn.className = 'app-fab install-fab';
-    btn.innerHTML = '<i class="fas fa-download"></i>';
-    btn.title = 'Install WhatsMeet App';
-    btn.onclick = async () => {
-        if (!deferredInstallPrompt) return showToast('Open browser menu → Add to Home Screen');
-        deferredInstallPrompt.prompt();
-        await deferredInstallPrompt.userChoice.catch(()=>{});
-        deferredInstallPrompt = null;
-        btn.remove();
-    };
-    document.querySelector('.phone-container')?.appendChild(btn);
-}
-function getProfileKey() { return 'whatsmeetProfile_' + (currentUser ? currentUser.username : 'guest'); }
-function loadLocalProfile() { try { return JSON.parse(localStorage.getItem(getProfileKey()) || '{}') || {}; } catch(e) { return {}; } }
-function saveLocalProfile(profile) { localStorage.setItem(getProfileKey(), JSON.stringify(profile)); applyLocalProfile(profile); broadcastOwnProfile(); dbSyncOwnProfile(); }
-function applyLocalProfile(profile = loadLocalProfile()) {
-    const about = document.getElementById('cyberProfileAboutText');
-    if (about) about.textContent = profile.about || 'Hey there! I am using WhatsMeet';
-    const preview = document.getElementById('profilePhotoPreview');
-    if (preview) preview.innerHTML = profile.photo ? `<img src="${profile.photo}">` : '<i class="fas fa-user"></i>';
-    updateChatAvatar(activeChatUsername);
-}
-function resizeProfilePhoto(file) {
-    return new Promise((resolve) => {
-        const img = new Image();
-        const reader = new FileReader();
-        reader.onload = () => { img.src = reader.result; };
-        img.onload = () => {
-            const size = 220;
-            const canvas = document.createElement('canvas');
-            canvas.width = size; canvas.height = size;
-            const ctx = canvas.getContext('2d');
-            const scale = Math.max(size / img.width, size / img.height);
-            const sw = size / scale, sh = size / scale;
-            ctx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, 0, 0, size, size);
-            resolve(canvas.toDataURL('image/jpeg', 0.78));
-        };
-        img.onerror = () => resolve('');
-        reader.readAsDataURL(file);
-    });
-}
-function injectAdvancedProfileCard() {
-    const box = document.getElementById('cyberDashboardBox');
-    if (!box || document.getElementById('advancedProfileCard')) return;
-    const profile = loadLocalProfile();
-    const card = document.createElement('div');
-    card.id = 'advancedProfileCard';
-    card.className = 'advanced-profile-card';
-    card.innerHTML = `
-        <div class="profile-photo-preview" id="profilePhotoPreview">${profile.photo ? `<img src="${profile.photo}">` : '<i class="fas fa-user"></i>'}</div>
-        <div class="advanced-profile-info">
-            <b>Profile Photo & About</b>
-            <span id="cyberProfileAboutText">${profile.about || 'Hey there! I am using WhatsMeet'}</span>
-            <div class="advanced-profile-actions">
-                <button id="changeProfilePhotoBtn"><i class="fas fa-camera"></i> Photo</button>
-                <button id="changeAboutBtn"><i class="fas fa-pen"></i> About</button>
-                <button id="showQrBtn"><i class="fas fa-qrcode"></i> QR</button>
-            </div>
-            <input id="profilePhotoInput" type="file" accept="image/*" hidden>
-        </div>`;
-    box.appendChild(card);
-    const input = card.querySelector('#profilePhotoInput');
-    card.querySelector('#changeProfilePhotoBtn').onclick = () => input.click();
-    input.onchange = () => {
-        const file = input.files[0]; if (!file) return;
-        resizeProfilePhoto(file).then(photo => { const p = loadLocalProfile(); p.photo = photo; saveLocalProfile(p); card.querySelector('#profilePhotoPreview').innerHTML = `<img src="${p.photo}">`; });
-    };
-    card.querySelector('#changeAboutBtn').onclick = () => { const p = loadLocalProfile(); const about = prompt('Set About:', p.about || 'Hey there! I am using WhatsMeet'); if (about !== null) { p.about = about.trim(); saveLocalProfile(p); } };
-    card.querySelector('#showQrBtn').onclick = showMyQrCode;
-}
-function showMyQrCode() {
-    if (!currentUser) return showToast('Login first');
-    const data = `${location.origin}${location.pathname}?add=${encodeURIComponent(currentUser.username)}`;
-    let modal = document.getElementById('qrModal'); if (modal) modal.remove();
-    modal = document.createElement('div'); modal.id = 'qrModal'; modal.className = 'pro-modal';
-    modal.innerHTML = `<div class="pro-modal-card"><button class="pro-modal-close"><i class="fas fa-times"></i></button><h3>Scan to add @${currentUser.username}</h3><img class="qr-img" src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(data)}"><p>${data}</p><button class="btn btn-whatsapp" id="copyQrLinkBtn">Copy Link</button></div>`;
-    modal.querySelector('.pro-modal-close').onclick = () => modal.remove();
-    modal.querySelector('#copyQrLinkBtn').onclick = () => navigator.clipboard.writeText(data).then(()=>showToast('QR link copied'));
-    document.body.appendChild(modal);
-}
-function checkAddFriendLink() {
-    const u = new URLSearchParams(location.search).get('add');
-    if (!u) return;
-    setTimeout(() => {
-        if (!currentUser) return switchAppTab('profile');
-        openSearchModal && openSearchModal();
-        const inp = document.getElementById('cyberSearchInput');
-        if (inp) { inp.value = u; handleCyberSearch(); }
-    }, 1200);
-}
-function updateCallState(text) {
-    const el = document.querySelector('.room-status-indicator');
-    if (el) el.textContent = '● ' + text;
-}
-function showScreenShareBanner() {
-    let b = document.getElementById('screenShareBanner');
-    if (!b) {
-        b = document.createElement('div'); b.id = 'screenShareBanner'; b.className = 'screen-share-banner';
-        b.innerHTML = '<i class="fas fa-desktop"></i><span>You are sharing your screen</span><button onclick="toggleScreenBtn.click()">Stop</button>';
-        roomPage.appendChild(b);
-    }
-    b.classList.add('show');
-}
-function hideScreenShareBanner() { document.getElementById('screenShareBanner')?.classList.remove('show'); }
-function getGroupsKey() { return 'whatsmeetGroups_' + (currentUser ? currentUser.username : 'guest'); }
-function loadGroups() { try { return JSON.parse(localStorage.getItem(getGroupsKey()) || '[]') || []; } catch(e) { return []; } }
-function saveGroups(groups) { localStorage.setItem(getGroupsKey(), JSON.stringify(groups)); }
-function injectAdvancedHub() {
-    if (document.getElementById('advancedHub')) return;
-    const target = document.getElementById('chatsLoggedInDashboard');
-    if (!target) return;
-    const hub = document.createElement('div');
-    hub.id = 'advancedHub';
-    hub.className = 'advanced-hub';
-    hub.innerHTML = `
-        <button onclick="createGroupChat()"><i class="fas fa-users"></i><span>Group</span></button>
-        <button onclick="openStatusCenter()"><i class="fas fa-circle-notch"></i><span>Status</span></button>
-        <button onclick="openMediaGallery()"><i class="fas fa-photo-video"></i><span>Media</span></button>
-        <button onclick="sendLiveLocation()"><i class="fas fa-location-dot"></i><span>Location</span></button>
-        <button onclick="showMyQrCode()"><i class="fas fa-qrcode"></i><span>QR</span></button>`;
-    target.prepend(hub);
-    renderGroupsInChatList();
-}
-function createGroupChat() {
-    if (!currentUser || !peer) return showToast('Login first');
-    const name = prompt('Group name:'); if (!name) return;
-    const members = prompt('Members usernames comma separated (without @):'); if (!members) return;
-    const group = { id: 'g_' + Date.now(), name: name.trim(), members: members.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean), createdAt: Date.now() };
-    const groups = loadGroups(); groups.unshift(group); saveGroups(groups); renderGroupsInChatList(); openGroupChat(group.id);
-}
-function renderGroupsInChatList() {
-    const list = document.getElementById('cyberFriendsChatsList'); if (!list) return;
-    document.querySelectorAll('.group-chat-row').forEach(x=>x.remove());
-    loadGroups().forEach(g => {
-        const row = document.createElement('div'); row.className = 'cyber-item group-chat-row';
-        row.innerHTML = `<div class="cyber-item-info"><div class="cyber-item-name"><span>👥 ${g.name}</span></div><div class="cyber-item-id">${g.members.length} members • local P2P group</div></div><div class="cyber-actions"><button class="btn btn-whatsapp-outline btn-small quick-call-btn" onclick="openGroupChat('${g.id}')"><i class="fas fa-comment"></i></button></div>`;
-        list.prepend(row);
-    });
-}
-function openGroupChat(groupId) {
-    const g = loadGroups().find(x => x.id === groupId); if (!g) return;
-    activeGroupChat = g; activeChatUsername = 'group:' + g.id; activeChatDisplayName = '👥 ' + g.name;
-    showPage(roomPage); roomIdDisplay.textContent = activeChatDisplayName; waitingScreen.style.display = 'none'; callScreen.classList.add('hidden'); chatPanel.classList.add('direct-chat-mode'); chatPanel.classList.remove('hidden'); updateChatHeader(`${g.members.length} members`);
-    chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Local P2P group chat. Members must be online.</div>';
-    groupConnections = {};
-    g.members.filter(u => u !== currentUser.username).forEach(u => {
-        try { const conn = peer.connect(u, { reliable: true }); groupConnections[u] = conn; conn.on('data', handleDataMessage); conn.on('open', () => showToast(`Connected @${u}`)); } catch(e) {}
-    });
-}
-window.createGroupChat = createGroupChat; window.openGroupChat = openGroupChat;
-function getStatusKey() { return 'whatsmeetStatuses_' + (currentUser ? currentUser.username : 'guest'); }
-function loadStatuses(){ try { return JSON.parse(localStorage.getItem(getStatusKey()) || '[]').filter(s => Date.now() - s.at < 24*60*60*1000); } catch(e){ return []; } }
-function saveStatuses(st){ localStorage.setItem(getStatusKey(), JSON.stringify(st)); }
-function openStatusCenter() {
-    let modal = document.getElementById('statusModal'); if (modal) modal.remove();
-    const statuses = loadStatuses();
-    modal = document.createElement('div'); modal.id='statusModal'; modal.className='pro-modal';
-    modal.innerHTML = `<div class="pro-modal-card status-card"><button class="pro-modal-close"><i class="fas fa-times"></i></button><h3>Status / Stories</h3><button class="btn btn-whatsapp" id="addTextStatusBtn">Add Text Status</button><div class="status-list">${statuses.length ? statuses.map(s=>`<div class="status-item"><b>${new Date(s.at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</b><p>${s.text}</p></div>`).join('') : '<p>No status yet</p>'}</div></div>`;
-    modal.querySelector('.pro-modal-close').onclick=()=>modal.remove();
-    modal.querySelector('#addTextStatusBtn').onclick=()=>{ const text=prompt('Write status:'); if(text){ const st=loadStatuses(); st.unshift({text, at:Date.now()}); saveStatuses(st); dbCreateStatus(text); modal.remove(); openStatusCenter(); }};
-    document.body.appendChild(modal);
-}
-window.openStatusCenter = openStatusCenter;
-function collectMediaItem(url, type, name) { sessionMediaGallery.unshift({ url, type, name, at: Date.now(), chat: activeChatDisplayName }); sessionMediaGallery = sessionMediaGallery.slice(0, 100); window.sessionMediaGallery = sessionMediaGallery; }
-function openMediaGallery() {
-    window.sessionMediaGallery = sessionMediaGallery;
-    let modal=document.getElementById('mediaGalleryModal'); if(modal) modal.remove();
-    modal=document.createElement('div'); modal.id='mediaGalleryModal'; modal.className='pro-modal';
-    modal.innerHTML=`<div class="pro-modal-card media-gallery-card"><button class="pro-modal-close"><i class="fas fa-times"></i></button><h3>Media Gallery</h3><div class="media-gallery-grid">${sessionMediaGallery.length ? sessionMediaGallery.map((m,i)=>`<button onclick="openMediaPreview(sessionMediaGallery[${i}].url, sessionMediaGallery[${i}].type, sessionMediaGallery[${i}].name)">${m.type==='video'?`<video src="${m.url}"></video>`:`<img src="${m.url}">`}<span>${m.name}</span></button>`).join('') : '<p>No media in this session yet</p>'}</div></div>`;
-    modal.querySelector('.pro-modal-close').onclick=()=>modal.remove(); document.body.appendChild(modal);
-}
-window.openMediaGallery=openMediaGallery;
-function sendLiveLocation() {
-    if (!navigator.geolocation) return showToast('Location not supported');
-    showToast('Getting location...');
-    navigator.geolocation.getCurrentPosition(pos => {
-        const { latitude, longitude } = pos.coords;
-        const link = `📍 Live location: https://maps.google.com/?q=${latitude},${longitude}`;
-        if (chatInput) { chatInput.value = link; updateChatComposer(); sendTextMessage(); }
-        else showToast(link, 8000);
-    }, () => showToast('Location permission denied'), { enableHighAccuracy: true, timeout: 12000 });
-}
-window.sendLiveLocation=sendLiveLocation;
-function initAdvancedAppPack() {
-    registerPWAAndNotifications(); injectAdvancedProfileCard(); injectAdvancedHub(); applyLocalProfile(); checkAddFriendLink(); renderGroupsInChatList(); renderLocalCallHistory();
-}
-setTimeout(initAdvancedAppPack, 1000);
-
-// ============ Whiteboard Safety Fix ============
-let wbColor = '#00f0ff';
-function setWbColor(color) { wbColor = color || '#00f0ff'; }
-window.setWbColor = setWbColor;
-(function initWhiteboardSafe() {
-    const modal = document.getElementById('whiteboardModal');
-    const canvas = document.getElementById('whiteboardCanvas');
-    const closeBtn = document.getElementById('closeWhiteboardBtn');
-    const clearBtn = document.getElementById('clearWhiteboardBtn');
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    let drawing = false;
-    function pos(e) {
-        const r = canvas.getBoundingClientRect();
-        const t = e.touches ? e.touches[0] : e;
-        return { x: (t.clientX - r.left) * (canvas.width / r.width), y: (t.clientY - r.top) * (canvas.height / r.height) };
-    }
-    function start(e) { drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); e.preventDefault?.(); }
-    function move(e) { if (!drawing) return; const p = pos(e); ctx.strokeStyle = wbColor; ctx.lineWidth = wbColor === '#04040c' ? 18 : 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineTo(p.x, p.y); ctx.stroke(); e.preventDefault?.(); }
-    function end() { drawing = false; }
-    ['mousedown','touchstart'].forEach(ev => canvas.addEventListener(ev, start, { passive:false }));
-    ['mousemove','touchmove'].forEach(ev => canvas.addEventListener(ev, move, { passive:false }));
-    ['mouseup','mouseleave','touchend','touchcancel'].forEach(ev => canvas.addEventListener(ev, end));
-    if (closeBtn && modal) closeBtn.addEventListener('click', () => modal.classList.add('hidden'));
-    if (clearBtn) clearBtn.addEventListener('click', () => ctx.clearRect(0, 0, canvas.width, canvas.height));
-})();
