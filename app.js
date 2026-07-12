@@ -59,6 +59,7 @@ let activeChatUsername = null, activeChatDisplayName = 'App Chat Room';
 let unreadCounts = {};
 let chatMeta = {};
 let chatPrefs = {};
+let peerProfiles = {};
 let localCallHistory = [];
 let lastFriendsCache = [];
 let typingRestoreTimer = null;
@@ -659,6 +660,7 @@ async function callPeer(targetPeerId, callType = 'video') {
     dataConnection = peer.connect(targetPeerId, { reliable: true });
     dataConnection.on('open', () => {
         console.log('Data connection established!');
+        sendOwnProfileToConnection(dataConnection);
     });
     dataConnection.on('data', handleDataMessage);
     dataConnection.on('close', () => console.log('Data connection closed'));
@@ -685,7 +687,7 @@ async function handleIncomingCall(call) {
 
 function handleIncomingData(conn) {
     dataConnection = conn;
-    conn.on('open', () => console.log('Data connection from joiner!'));
+    conn.on('open', () => { console.log('Data connection from joiner!'); sendOwnProfileToConnection(conn); });
     conn.on('data', handleDataMessage);
     conn.on('close', () => console.log('Data connection closed'));
 }
@@ -1025,6 +1027,7 @@ function sendTextMessage() {
             if (conn && conn.open) conn.send({ type: 'chat', id: createMessageId(), text, burn: isBurnChatActive, from: currentUser ? currentUser.username : userRole, ts: Date.now(), reply: replyingToMessage, groupId: activeGroupChat.id, groupName: activeGroupChat.name });
         });
     }
+    dbSaveMessage(activeChatUsername, text, 'text', messageId, replyingToMessage);
     chatInput.value = '';
     clearReplyMode();
     updateChatComposer();
@@ -1037,12 +1040,129 @@ function updateChatComposer() {
 
 function updateChatHeader(statusText) {
     if (chatContactName) chatContactName.textContent = activeChatDisplayName || 'App Chat Room';
+    const peerProfile = activeChatUsername ? (peerProfiles[activeChatUsername] || {}) : {};
     if (chatContactStatus) {
-        chatContactStatus.textContent = statusText || (activeChatUsername ? '@' + activeChatUsername + ' • tap call icons to call' : 'end-to-end encrypted');
+        const defaultStatus = activeChatUsername ? (peerProfile.about || ('@' + activeChatUsername + ' • tap call icons to call')) : 'end-to-end encrypted';
+        chatContactStatus.textContent = statusText || defaultStatus;
         chatContactStatus.classList.toggle('typing', statusText === 'typing...');
     }
+    updateChatAvatar(activeChatUsername);
 }
 
+async function dbPost(path, payload) {
+    try {
+        const res = await fetch(`${SERVER_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {}) });
+        return await res.json().catch(() => ({}));
+    } catch(e) { return { error: 'offline' }; }
+}
+async function dbGet(path) {
+    try {
+        const res = await fetch(`${SERVER_URL}${path}`);
+        return await res.json().catch(() => ({}));
+    } catch(e) { return { error: 'offline' }; }
+}
+async function dbSaveMessage(receiver, text, type='text', clientId=null, reply=null) {
+    if (!currentUser || !receiver || receiver.startsWith('group:')) return;
+    return dbPost('/api/messages/send', { sender: currentUser.username, receiver, message: text, type, client_id: clientId, reply });
+}
+async function dbLoadMessageHistory(friendUsername) {
+    if (!currentUser || !friendUsername || friendUsername.startsWith('group:')) return;
+    const result = await dbGet(`/api/messages/history?username=${encodeURIComponent(currentUser.username)}&friend_username=${encodeURIComponent(friendUsername)}&limit=80`);
+    if (!result.messages || !Array.isArray(result.messages)) return;
+    chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Encrypted chat history loaded from secure database 🔐</div>';
+    result.messages.forEach(m => {
+        const mine = m.sender === currentUser.username;
+        addChatMessage(m.text || '', mine, false, String(m.id), mine ? 'read' : 'sent', m.reply ? safeJsonParse(m.reply) : null);
+        if (m.edited) {
+            const el = chatMessages.querySelector(`[data-message-id="${m.id}"]`);
+            if (el) el.classList.add('edited-message');
+        }
+        if (m.deleted) applyMessageDelete(String(m.id));
+        if (m.reactions) applyMessageReaction(String(m.id), m.reactions);
+    });
+}
+function safeJsonParse(v) { try { return typeof v === 'string' ? JSON.parse(v) : v; } catch(e) { return null; } }
+async function dbSyncOwnProfile() {
+    if (!currentUser) return;
+    const p = loadLocalProfile ? loadLocalProfile() : {};
+    return dbPost('/api/profile/update', { username: currentUser.username, about: p.about || 'Hey there! I am using WhatsMeet', photo: p.photo || '' });
+}
+async function dbLogCall(peerUsername, direction, callType, status='started', duration=0) {
+    if (!currentUser || !peerUsername) return;
+    const caller = direction === 'incoming' ? peerUsername : currentUser.username;
+    const receiver = direction === 'incoming' ? currentUser.username : peerUsername;
+    return dbPost('/api/calls/log', { caller, receiver, call_type: callType, status, duration_seconds: duration });
+}
+async function dbCreateStatus(text, type='text', media='') {
+    if (!currentUser) return;
+    return dbPost('/api/status/create', { username: currentUser.username, text, type, media });
+}
+async function dbLoadStatuses() {
+    if (!currentUser) return [];
+    const r = await dbGet(`/api/status/list?username=${encodeURIComponent(currentUser.username)}`);
+    return r.statuses || [];
+}
+function getPeerProfilesKey() { return 'whatsmeetPeerProfiles_' + (currentUser ? currentUser.username : 'guest'); }
+function loadPeerProfiles() { try { peerProfiles = JSON.parse(localStorage.getItem(getPeerProfilesKey()) || '{}') || {}; } catch(e) { peerProfiles = {}; } }
+function savePeerProfiles() { try { localStorage.setItem(getPeerProfilesKey(), JSON.stringify(peerProfiles)); } catch(e) {} }
+function getInitials(nameOrUser) {
+    const v = String(nameOrUser || '?').replace('@','').trim();
+    return (v.split(/\s+/).map(x => x[0]).join('').slice(0, 2) || '?').toUpperCase();
+}
+function getOwnProfilePayload() {
+    const p = loadLocalProfile ? loadLocalProfile() : {};
+    return {
+        username: currentUser ? currentUser.username : userRole,
+        display_name: currentUser ? currentUser.display_name : 'User',
+        about: p.about || 'Hey there! I am using WhatsMeet',
+        photo: p.photo || ''
+    };
+}
+function savePeerProfile(username, profile) {
+    if (!username || username === (currentUser && currentUser.username)) return;
+    peerProfiles[username] = Object.assign({}, peerProfiles[username] || {}, profile || {}, { updatedAt: Date.now() });
+    savePeerProfiles();
+    if (activeChatUsername === username) {
+        activeChatDisplayName = peerProfiles[username].display_name || ('@' + username);
+        updateChatHeader();
+    }
+    updateChatMetaRows();
+}
+function sendOwnProfileToConnection(conn) {
+    try {
+        if (conn && conn.open) conn.send({ type: 'profile-update', profile: getOwnProfilePayload(), from: currentUser ? currentUser.username : userRole });
+    } catch(e) {}
+}
+function broadcastOwnProfile() {
+    sendOwnProfileToConnection(dataConnection);
+    Object.values(groupConnections || {}).forEach(sendOwnProfileToConnection);
+}
+function updateChatAvatar(username) {
+    const avatar = document.querySelector('.whatsapp-chat-header .chat-avatar');
+    if (!avatar) return;
+    avatar.style.backgroundImage = '';
+    avatar.style.backgroundSize = '';
+    avatar.innerHTML = '<i class="fas fa-user"></i>';
+    if (!username || username.startsWith('group:')) {
+        avatar.innerHTML = '<i class="fas fa-users"></i>';
+        avatar.style.background = 'linear-gradient(135deg,#00a884,#005c4b)';
+        return;
+    }
+    const prof = peerProfiles[username] || {};
+    if (prof.photo) {
+        avatar.style.background = '#202c33';
+        avatar.style.backgroundImage = `url(${prof.photo})`;
+        avatar.style.backgroundSize = 'cover';
+        avatar.style.backgroundPosition = 'center';
+        avatar.innerHTML = '';
+    } else {
+        avatar.style.background = 'linear-gradient(135deg,#00a884,#005c4b)';
+        avatar.innerHTML = `<span class="avatar-initials">${getInitials(prof.display_name || username)}</span>`;
+    }
+}
+function getPeerDisplayName(username, fallback) {
+    return (peerProfiles[username] && peerProfiles[username].display_name) || fallback || username;
+}
 function getChatPrefsKey() { return 'meetlinkChatPrefs_' + (currentUser ? currentUser.username : 'guest'); }
 function loadChatPrefs() { try { chatPrefs = JSON.parse(localStorage.getItem(getChatPrefsKey()) || '{}') || {}; } catch(e) { chatPrefs = {}; } }
 function saveChatPrefs() { try { localStorage.setItem(getChatPrefsKey(), JSON.stringify(chatPrefs)); } catch(e) {} }
@@ -1055,6 +1175,7 @@ function recordCallHistory(peerUsername, direction, callType, status = 'started'
     localCallHistory.unshift({ peer: peerUsername, direction, callType, status, at: Date.now() });
     localCallHistory = localCallHistory.slice(0, 50);
     saveCallHistory();
+    dbLogCall(peerUsername, direction, callType, status);
     renderLocalCallHistory();
 }
 function renderLocalCallHistory() {
@@ -1208,6 +1329,7 @@ function getUnreadStorageKey() {
 function loadUnreadCounts() {
     loadChatMeta();
     loadChatPrefs();
+    loadPeerProfiles();
     loadCallHistory();
     try { unreadCounts = JSON.parse(localStorage.getItem(getUnreadStorageKey()) || '{}') || {}; }
     catch(e) { unreadCounts = {}; }
@@ -1500,6 +1622,11 @@ async function sendFile(file) {
 function handleDataMessage(data) {
     if (!data || !data.type) return;
     const senderPeer = data.from || (dataConnection && dataConnection.peer) || activeChatUsername || 'friend';
+    if (data.type === 'profile-update') {
+        const prof = data.profile || {};
+        savePeerProfile(prof.username || senderPeer, prof);
+        return;
+    }
     if (data.type === 'chat') {
         addChatMessage(data.text, false, data.burn || false, data.id || null, 'sent', data.reply || null);
         updateChatMeta(senderPeer, data.burn ? '🔥 View-once message' : (data.text || 'New message'), data.ts || Date.now());
@@ -1806,6 +1933,7 @@ function loginSession(user) {
     currentUser = user;
     localStorage.setItem('cyberUser', JSON.stringify(user));
     initCyberDashboard();
+    setTimeout(dbSyncOwnProfile, 1200);
     switchAppTab('chats');
 }
 
@@ -1928,12 +2056,17 @@ function renderFriendsList(friends) {
         const statusText = f.is_online ? 'Online' : 'Offline';
         const safeDisplayName = encodeURIComponent(String(f.display_name || f.username)).replace(/'/g, '%27');
         const meta = chatMeta[f.username] || {};
-        const preview = meta.lastMessage || 'Tap to chat or call';
+        if (f.about || f.photo) savePeerProfile(f.username, { username: f.username, display_name: f.display_name, about: f.about || '', photo: f.photo || '' });
+        const prof = peerProfiles[f.username] || {};
+        const displayName = prof.display_name || f.display_name;
+        const preview = meta.lastMessage || prof.about || 'Tap to chat or call';
         const lastTime = formatChatListTime(meta.lastAt);
+        const avatarHtml = prof.photo ? `<div class="cyber-row-avatar" style="background-image:url('${prof.photo}')"></div>` : `<div class="cyber-row-avatar"><span>${getInitials(displayName || f.username)}</span></div>`;
 
         item.innerHTML = `
+            ${avatarHtml}
             <div class="cyber-item-info">
-                <div class="cyber-item-name"><span>${(chatPrefs[f.username] || {}).pinned ? '📌 ' : ''}${(chatPrefs[f.username] || {}).muted ? '🔇 ' : ''}${f.display_name}</span><span class="chat-last-time">${lastTime}</span><span class="unread-badge" style="display:none;">0</span></div>
+                <div class="cyber-item-name"><span>${(chatPrefs[f.username] || {}).pinned ? '📌 ' : ''}${(chatPrefs[f.username] || {}).muted ? '🔇 ' : ''}${displayName}</span><span class="chat-last-time">${lastTime}</span><span class="unread-badge" style="display:none;">0</span></div>
                 <div class="cyber-item-id chat-row-sub">
                     <span class="status-dot ${statusClass}"></span>
                     <span class="chat-last-preview">${preview}</span>
@@ -2192,8 +2325,8 @@ function startFriendChat(friendUsername, displayName = null) {
     activeChatUsername = friendUsername;
     clearUnreadForPeer(friendUsername);
     setTimeout(sendReadReceiptForActiveChat, 250);
-    try { activeChatDisplayName = displayName ? decodeURIComponent(displayName) : '@' + friendUsername; }
-    catch(e) { activeChatDisplayName = displayName || '@' + friendUsername; }
+    try { activeChatDisplayName = getPeerDisplayName(friendUsername, displayName ? decodeURIComponent(displayName) : '@' + friendUsername); }
+    catch(e) { activeChatDisplayName = getPeerDisplayName(friendUsername, displayName || '@' + friendUsername); }
     showToast(`💬 Opening chat with @${friendUsername}...`);
     showPage(roomPage);
     roomIdDisplay.textContent = activeChatDisplayName;
@@ -2203,12 +2336,14 @@ function startFriendChat(friendUsername, displayName = null) {
     chatPanel.classList.remove('hidden');
     updateChatHeader('connecting...');
     chatMessages.innerHTML = '<div class="chat-date-pill">Today</div><div class="chat-system">Messages and calls are peer-to-peer encrypted 🔒</div>';
+    dbLoadMessageHistory(friendUsername);
     
     // Connect P2P data connection
     dataConnection = peer.connect(friendUsername, { reliable: true });
     dataConnection.on('open', () => {
         updateChatHeader('online • peer-to-peer connected');
         showToast('⚡ Direct secure chat connected!');
+        sendOwnProfileToConnection(dataConnection);
         playSciFiSound('join');
         if (dataConnection && dataConnection.open) {
             dataConnection.send({ type: 'typing', isTyping: false, from: currentUser ? currentUser.username : userRole });
@@ -2227,7 +2362,7 @@ function startFriendCall(friendUsername, callType = 'video') {
         return;
     }
     activeChatUsername = friendUsername;
-    activeChatDisplayName = '@' + friendUsername;
+    activeChatDisplayName = getPeerDisplayName(friendUsername, '@' + friendUsername);
     updateChatHeader(callType === 'audio' ? 'voice call ringing...' : 'video call ringing...');
     recordCallHistory(friendUsername, 'outgoing', callType, 'started');
     showToast(`📞 Starting ${callType} call to @${friendUsername}...`);
@@ -2431,9 +2566,10 @@ function handleIncomingCyberConnection(conn) {
     console.log('💬 Direct chat connection from:', conn.peer);
     dataConnection = conn;
     activeChatUsername = conn.peer;
-    activeChatDisplayName = '@' + conn.peer;
+    activeChatDisplayName = getPeerDisplayName(conn.peer, '@' + conn.peer);
     conn.on('open', () => {
         updateChatHeader('online • peer-to-peer connected');
+        sendOwnProfileToConnection(conn);
         showToast(`💬 @${conn.peer} opened a chat with you!`);
     });
     conn.on('data', handleDataMessage);
@@ -2793,14 +2929,32 @@ function showInstallButton() {
 }
 function getProfileKey() { return 'whatsmeetProfile_' + (currentUser ? currentUser.username : 'guest'); }
 function loadLocalProfile() { try { return JSON.parse(localStorage.getItem(getProfileKey()) || '{}') || {}; } catch(e) { return {}; } }
-function saveLocalProfile(profile) { localStorage.setItem(getProfileKey(), JSON.stringify(profile)); applyLocalProfile(profile); }
+function saveLocalProfile(profile) { localStorage.setItem(getProfileKey(), JSON.stringify(profile)); applyLocalProfile(profile); broadcastOwnProfile(); dbSyncOwnProfile(); }
 function applyLocalProfile(profile = loadLocalProfile()) {
-    const avatars = document.querySelectorAll('.chat-avatar');
-    avatars.forEach(a => {
-        if (profile.photo) { a.style.backgroundImage = `url(${profile.photo})`; a.style.backgroundSize = 'cover'; a.innerHTML = ''; }
-    });
     const about = document.getElementById('cyberProfileAboutText');
     if (about) about.textContent = profile.about || 'Hey there! I am using WhatsMeet';
+    const preview = document.getElementById('profilePhotoPreview');
+    if (preview) preview.innerHTML = profile.photo ? `<img src="${profile.photo}">` : '<i class="fas fa-user"></i>';
+    updateChatAvatar(activeChatUsername);
+}
+function resizeProfilePhoto(file) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        const reader = new FileReader();
+        reader.onload = () => { img.src = reader.result; };
+        img.onload = () => {
+            const size = 220;
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            const scale = Math.max(size / img.width, size / img.height);
+            const sw = size / scale, sh = size / scale;
+            ctx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, 0, 0, size, size);
+            resolve(canvas.toDataURL('image/jpeg', 0.78));
+        };
+        img.onerror = () => resolve('');
+        reader.readAsDataURL(file);
+    });
 }
 function injectAdvancedProfileCard() {
     const box = document.getElementById('cyberDashboardBox');
@@ -2826,9 +2980,7 @@ function injectAdvancedProfileCard() {
     card.querySelector('#changeProfilePhotoBtn').onclick = () => input.click();
     input.onchange = () => {
         const file = input.files[0]; if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => { const p = loadLocalProfile(); p.photo = reader.result; saveLocalProfile(p); card.querySelector('#profilePhotoPreview').innerHTML = `<img src="${p.photo}">`; };
-        reader.readAsDataURL(file);
+        resizeProfilePhoto(file).then(photo => { const p = loadLocalProfile(); p.photo = photo; saveLocalProfile(p); card.querySelector('#profilePhotoPreview').innerHTML = `<img src="${p.photo}">`; });
     };
     card.querySelector('#changeAboutBtn').onclick = () => { const p = loadLocalProfile(); const about = prompt('Set About:', p.about || 'Hey there! I am using WhatsMeet'); if (about !== null) { p.about = about.trim(); saveLocalProfile(p); } };
     card.querySelector('#showQrBtn').onclick = showMyQrCode;
@@ -2922,7 +3074,7 @@ function openStatusCenter() {
     modal = document.createElement('div'); modal.id='statusModal'; modal.className='pro-modal';
     modal.innerHTML = `<div class="pro-modal-card status-card"><button class="pro-modal-close"><i class="fas fa-times"></i></button><h3>Status / Stories</h3><button class="btn btn-whatsapp" id="addTextStatusBtn">Add Text Status</button><div class="status-list">${statuses.length ? statuses.map(s=>`<div class="status-item"><b>${new Date(s.at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</b><p>${s.text}</p></div>`).join('') : '<p>No status yet</p>'}</div></div>`;
     modal.querySelector('.pro-modal-close').onclick=()=>modal.remove();
-    modal.querySelector('#addTextStatusBtn').onclick=()=>{ const text=prompt('Write status:'); if(text){ const st=loadStatuses(); st.unshift({text, at:Date.now()}); saveStatuses(st); modal.remove(); openStatusCenter(); }};
+    modal.querySelector('#addTextStatusBtn').onclick=()=>{ const text=prompt('Write status:'); if(text){ const st=loadStatuses(); st.unshift({text, at:Date.now()}); saveStatuses(st); dbCreateStatus(text); modal.remove(); openStatusCenter(); }};
     document.body.appendChild(modal);
 }
 window.openStatusCenter = openStatusCenter;
