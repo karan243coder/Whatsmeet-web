@@ -229,7 +229,7 @@ function drawCover(ctx, video, dx, dy, dw, dh) {
 function setupRecordingStreams() {
     try {
         const recCanvas = recordingCanvas;
-        const RW = 540, RH = 960;
+        const RW = 360, RH = 640;
         recCanvas.width = RW;
         recCanvas.height = RH;
         const ctx = recCanvas.getContext('2d');
@@ -273,7 +273,7 @@ function setupRecordingStreams() {
             if (currentCallMode === 'video') {
                 try {
                     if (localVideo && localVideo.readyState >= 2 && localVideo.videoWidth) {
-                        const pipW = 135, pipH = 240, margin = 18;
+                        const pipW = 96, pipH = 170, margin = 12;
                         const pipX = RW - pipW - margin, pipY = margin;
                         ctx.fillStyle = '#00a884';
                         ctx.fillRect(pipX - 2, pipY - 2, pipW + 4, pipH + 4);
@@ -281,7 +281,7 @@ function setupRecordingStreams() {
                         ctx.fillStyle = 'rgba(0,0,0,0.6)';
                         ctx.fillRect(pipX, pipY + pipH - 16, pipW, 16);
                         ctx.fillStyle = '#ffffff';
-                        ctx.font = '14px Inter, sans-serif';
+                        ctx.font = '9px Inter, sans-serif';
                         ctx.textAlign = 'center';
                         ctx.fillText('You', pipX + pipW / 2, pipY + pipH - 4);
                     }
@@ -293,14 +293,14 @@ function setupRecordingStreams() {
             const dateStr = now.toLocaleDateString();
             const elapsed = callStartTime ? formatCallDuration() : '00:00';
             ctx.fillStyle = 'rgba(0,0,0,0.6)';
-            ctx.fillRect(12, 12, 320, 32);
+            ctx.fillRect(8, 8, 200, 20);
             ctx.fillStyle = '#ff2d75';
-            ctx.font = '15px Orbitron, monospace';
+            ctx.font = '10px Orbitron, monospace';
             ctx.textAlign = 'left';
-            ctx.fillText('● REC  ' + dateStr + ' ' + timeStr + ' [' + elapsed + ']', 18, 34);
+            ctx.fillText('● REC  ' + dateStr + ' ' + timeStr + ' [' + elapsed + ']', 12, 22);
         }, 1000 / 24);
 
-        const canvasVideoStream = recCanvas.captureStream(24);
+        const canvasVideoStream = recCanvas.captureStream(20);
 
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const destination = audioCtx.createMediaStreamDestination();
@@ -348,7 +348,7 @@ function startNewSegment() {
     segmentNumber++;
     recordedChunks = [];
     const mimeType = getSupportedMimeType();
-    mediaRecorder = new MediaRecorder(combinedStream, { mimeType, videoBitsPerSecond: 2500000, audioBitsPerSecond: 128000 });
+    mediaRecorder = new MediaRecorder(combinedStream, { mimeType, videoBitsPerSecond: 1500000, audioBitsPerSecond: 128000 });
     mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
     mediaRecorder.onstop = () => {
         if (recordedChunks.length > 0) {
