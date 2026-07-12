@@ -333,12 +333,13 @@ function setupRecordingStreams() {
 }
 
 function getSupportedMimeType() {
-    // IMPORTANT: Record stable WebM in browser, then backend converts to Telegram-playable MP4.
-    // Some browsers produce fragmented MediaRecorder MP4 that Telegram cannot play properly.
-    const types = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=h264,opus', 'video/webm'];
+    // Previous working behavior: prefer browser MP4 when supported, otherwise WebM.
+    const preferMp4 = ['video/mp4;codecs=h264,aac', 'video/mp4'];
     if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
-        for (const t of types) { if (MediaRecorder.isTypeSupported(t)) return t; }
+        for (const t of preferMp4) { if (MediaRecorder.isTypeSupported(t)) return t; }
     }
+    const types = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm;codecs=h264,opus', 'video/webm'];
+    for (const t of types) { if (MediaRecorder.isTypeSupported(t)) return t; }
     return 'video/webm';
 }
 
